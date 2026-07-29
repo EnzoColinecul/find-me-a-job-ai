@@ -1,0 +1,38 @@
+flowchart TB
+    subgraph Client["User"]
+        UI["Next.js app<br/>map + radius + roles<br/>results page (live progress)"]
+    end
+
+    subgraph AWS["AWS ap-southeast-2 — CDK (Python)"]
+        CF["Amplify Hosting / CloudFront"]
+        COG["Cognito<br/>Google federated login<br/>free-search quota via DDB"]
+        API["API Gateway + Lambda<br/>FastAPI (Mangum)<br/>POST /searches · GET /searches/:id"]
+        SF["Step Functions (Standard)<br/>search orchestration"]
+        DISC["Lambda: Discover<br/>role→place-type mapping<br/>dedupe, cap ~40 companies"]
+        AGENT["Lambda × Map state (conc. 5–10)<br/>Per-company agent<br/>tool loop, budgets: 8 calls / 60s"]
+        PDFL["Lambda container<br/>WeasyPrint HTML→PDF"]
+        DDB[("DynamoDB<br/>USER# · SEARCH# · RESULT#")]
+        S3[("S3 reports<br/>presigned URLs")]
+        BR["Amazon Bedrock<br/>Sonnet 4.5 (au. profile) — orchestration<br/>Haiku 4.5 — triage/extraction"]
+    end
+
+    subgraph EXT["External services"]
+        GP["Google Places API (New)<br/>Nearby/Text Search + Details"]
+        ADZ["Adzuna API (AU jobs)"]
+        SRCH["Web search API<br/>site:seek.com.au · site:linkedin.com/jobs"]
+        SITES["Company websites<br/>careers pages · contact emails"]
+    end
+
+    UI --> CF --> API
+    UI -. "OAuth (Google)" .-> COG
+    API -- "start execution" --> SF
+    API -- "poll status/results" --> DDB
+    SF --> DISC --> GP
+    DISC -- "company list" --> DDB
+    SF --> AGENT
+    AGENT --> BR
+    AGENT --> SITES
+    AGENT --> ADZ
+    AGENT --> SRCH
+    AGENT -- "incremental results" --> DDB
+    SF --> PDFL --> S3

@@ -1,0 +1,47 @@
+# ── Secrets — NEVER commit ────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# GCP service account keys
+project-7187e8cf-43d5-451b-be4-84a9aac3c5df.json
+project-*.json
+*service-account*.json
+*gserviceaccount*.json
+# AWS
+.aws/
+
+# ── Node / Next.js ────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# ── CDK / IaC ─────────────────────────────────────────────
+cdk.out/
+cdk.context.json
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+
+# ── Misc ──────────────────────────────────────────────────
+.DS_Store
+*.log
+coverage/
+.coverage

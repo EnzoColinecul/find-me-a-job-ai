@@ -1,0 +1,22 @@
+[project]
+name = "fmaj-infra"
+version = "0.1.0"
+description = "Find-Me-A-Job AI — AWS CDK (test & prod stages)"
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib>=2.170",
+    "constructs>=10.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

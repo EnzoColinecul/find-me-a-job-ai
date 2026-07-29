@@ -1,0 +1,12 @@
+# Golden eval set — 20 hand-checked companies (Notion card: "Agent eval set").
+# Fill during Phase 3. Format:
+#
+# - company:
+#     name: "Example Cafe"
+#     address: "1 Example St, Surry Hills NSW"
+#     website: "https://examplecafe.com.au"
+#     roles: ["barista"]
+#   expected:
+#     opportunity_type: careers_page   # careers_page | job_listing | contact_email | none
+#     links: ["https://examplecafe.com.au/careers"]
+cases: []
