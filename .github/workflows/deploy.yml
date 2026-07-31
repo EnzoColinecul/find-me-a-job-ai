@@ -1,0 +1,108 @@
+name: Deploy
+
+# Merge to main -> deploy TEST automatically.
+# Deploy PROD only after the "prod" GitHub Environment approval is granted.
+# Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_role.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  DEPLOY_ROLE: arn:aws:iam::418862088910:role/find-me-a-job-ai_role
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install CDK CLI
+        run: npm i -g aws-cdk
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-deploy-test
+
+      - name: Install infra deps
+        working-directory: infra
+        run: uv sync
+
+      - name: CDK deploy TEST
+        working-directory: infra
+        run: uv run cdk deploy 'Fmaj-Test/*' --require-approval never
+
+      - name: Smoke test
+        run: |
+          URL="${{ vars.TEST_API_URL }}"
+          if [ -z "$URL" ]; then
+            echo "TEST_API_URL not set yet — skipping smoke test"; exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")
+          echo "GET $URL/health -> $code"
+          [ "$code" = "200" ]
+
+  deploy-prod:
+    needs: deploy-test
+    runs-on: ubuntu-latest
+    environment: prod   # protection rule on this environment gates the deploy (manual approval)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install CDK CLI
+        run: npm i -g aws-cdk
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-deploy-prod
+
+      - name: Install infra deps
+        working-directory: infra
+        run: uv sync
+
+      - name: CDK deploy PROD
+        working-directory: infra
+        run: uv run cdk deploy 'Fmaj-Prod/*' --require-approval never
+
+      - name: Smoke test
+        run: |
+          URL="${{ vars.PROD_API_URL }}"
+          if [ -z "$URL" ]; then
+            echo "PROD_API_URL not set yet — skipping smoke test"; exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")
+          echo "GET $URL/health -> $code"
+          [ "$code" = "200" ]
