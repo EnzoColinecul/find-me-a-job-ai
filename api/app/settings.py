@@ -6,6 +6,7 @@ class Settings(BaseSettings):
 
     stage: str = "test"
     aws_region: str = "ap-southeast-2"
+    aws_profile: str = ""  # local dev only; empty in Lambda (role creds)
     table_name: str = "fmaj-test-main"
     reports_bucket: str = "fmaj-test-reports"
     cognito_user_pool_id: str = ""

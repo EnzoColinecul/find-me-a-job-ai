@@ -7,7 +7,7 @@ install:
 	cd infra && uv sync
 
 dev-api:
-	cd api && uv run uvicorn app.main:app --reload --port 8000
+	cd api && AWS_PROFILE=$${AWS_PROFILE:-fmaj-deploy} uv run uvicorn app.main:app --reload --port 8000
 
 dev-web:
 	cd web && npm run dev

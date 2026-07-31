@@ -59,19 +59,23 @@ _table = None
 _sfn = None
 
 
+def _session() -> boto3.Session:
+    return boto3.Session(
+        profile_name=settings.aws_profile or None, region_name=settings.aws_region
+    )
+
+
 def _get_table():
     global _table
     if _table is None:
-        _table = boto3.resource("dynamodb", region_name=settings.aws_region).Table(
-            settings.table_name
-        )
+        _table = _session().resource("dynamodb").Table(settings.table_name)
     return _table
 
 
 def _get_sfn():
     global _sfn
     if _sfn is None:
-        _sfn = boto3.client("stepfunctions", region_name=settings.aws_region)
+        _sfn = _session().client("stepfunctions")
     return _sfn
 
 
