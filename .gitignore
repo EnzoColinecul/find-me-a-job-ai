@@ -6,9 +6,13 @@
 *.key
 # GCP service account keys
 project-7187e8cf-43d5-451b-be4-84a9aac3c5df.json
+client_secret_773229780719-s1escbbohpbuepslkujnnmf9tlpifacl.apps.googleusercontent.com.json
 project-*.json
 *service-account*.json
 *gserviceaccount*.json
+# GCP OAuth client secret downloads
+client_secret*.json
+*.apps.googleusercontent.com.json
 # AWS
 .aws/
 
