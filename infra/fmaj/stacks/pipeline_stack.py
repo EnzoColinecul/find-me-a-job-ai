@@ -24,5 +24,12 @@ class PipelineStack(cdk.Stack):
         #   - Agent Lambda bundling ../agent, Bedrock invoke perms (au. profiles)
         #   - Aggregate Lambda; PDF container Lambda (WeasyPrint) -> reports bucket
         #   - Execution timeout 15 min; CloudWatch dashboard
+        #   - Grant these Lambdas secretsmanager:GetSecretValue on the external-API
+        #     secrets, e.g.:
+        #       for name in (f"fmaj/{config.stage}/places-key",
+        #                    f"fmaj/{config.stage}/adzuna",
+        #                    f"fmaj/{config.stage}/web-search-key"):
+        #           secretsmanager.Secret.from_secret_name_v2(self, ..., name) \
+        #               .grant_read(lambda_fn)
         self.config = config
         self.data = data
