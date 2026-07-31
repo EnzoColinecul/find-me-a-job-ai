@@ -38,6 +38,7 @@ build/
 # ── CDK / IaC ─────────────────────────────────────────────
 cdk.out/
 cdk.context.json
+*-outputs.json
 .terraform/
 .terraform.lock.hcl
 *.tfstate
