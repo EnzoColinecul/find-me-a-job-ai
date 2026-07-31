@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { login, logout } from "@/lib/auth";
 import { getMe, type Me } from "@/lib/api";
+import SearchForm from "@/components/SearchForm";
 
 export default function Home() {
   const [me, setMe] = useState<Me | null>(null);
@@ -30,9 +31,12 @@ export default function Home() {
           <p>
             Signed in as <strong>{me.name || me.email}</strong>
             {me.free_search_used ? " · free search used" : " · 1 free search available"}
+            {" · "}
+            <a href="#" onClick={(e) => { e.preventDefault(); logout(); }}>
+              sign out
+            </a>
           </p>
-          {/* TODO(Phase 1): map + radius + role form -> POST /searches */}
-          <button onClick={() => logout()}>Sign out</button>
+          <SearchForm />
         </div>
       ) : (
         <button onClick={() => login()}>Sign in with Google</button>

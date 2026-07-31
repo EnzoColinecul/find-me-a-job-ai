@@ -14,7 +14,7 @@ docs/    Plan, architecture diagram, ADRs
 
 ## Prerequisites
 
-- Node 20+ and pnpm (`corepack enable`)
+- Node 20+ (npm)
 - Python 3.12 and [uv](https://docs.astral.sh/uv/)
 - AWS CDK CLI (`npm i -g aws-cdk`)
 - AWS CLI profile `fmaj-deploy` assuming `arn:aws:iam::418862088910:role/find-me-a-job-ai_role` (region ap-southeast-2)

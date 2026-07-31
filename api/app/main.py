@@ -1,8 +1,9 @@
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 
 from app.auth import AuthUser, require_user
+from app.searches import QuotaExhausted, SearchRequest, create_search, get_search
 from app.settings import settings
 from app.users import ensure_user
 
@@ -34,9 +35,26 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
     }
 
 
-# TODO(Phase 1): POST /searches — validate params, enforce free-search quota
-#                (DynamoDB conditional update), start Step Functions execution.
-# TODO(Phase 1): GET /searches/{search_id} — status + incremental results.
+@app.post("/searches", status_code=201)
+def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> dict:
+    try:
+        meta = create_search(user.sub, req)
+    except QuotaExhausted:
+        raise HTTPException(
+            status_code=402,
+            detail="Your free search has been used. Subscriptions are coming soon!",
+        ) from None
+    return {"search_id": meta["search_id"], "status": meta["status"]}
+
+
+@app.get("/searches/{search_id}")
+def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+    found = get_search(user.sub, search_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Search not found")
+    return found
+
+
 # TODO(Phase 4): GET /searches/{search_id}/report — presigned PDF URL.
 
 # Lambda entrypoint
