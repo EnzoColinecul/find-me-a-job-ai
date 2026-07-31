@@ -1,0 +1,42 @@
+# Role → Google Places (New) mapping. This file is a product asset — tune it as the
+# discovery harness reveals gaps (Notion card: "Role → Places-type mapping").
+#
+# Each role has:
+#   types:      Places (New) Table A types for Nearby Search (empty = skip nearby)
+#   text_query: optional Text Search query used IN ADDITION when types are weak
+# Unknown roles fall back to Text Search with the role itself as the query.
+
+chef:
+  types: [restaurant, cafe, bakery, bar, meal_takeaway]
+kitchen hand:
+  types: [restaurant, cafe, bakery, meal_takeaway]
+barista:
+  types: [cafe, coffee_shop, bakery]
+waiter / waitress:
+  types: [restaurant, cafe, bar]
+bartender:
+  types: [bar, night_club, restaurant]
+retail assistant:
+  types: [clothing_store, shoe_store, department_store, convenience_store, gift_shop]
+supermarket assistant:
+  types: [supermarket, grocery_store]
+construction labourer:
+  types: [general_contractor, roofing_contractor]
+  text_query: construction company
+electrician:
+  types: [electrician]
+plumber:
+  types: [plumber]
+cleaner:
+  types: [lodging, gym, laundry]
+  text_query: cleaning services
+receptionist:
+  types: [dentist, doctor, real_estate_agency, lawyer, veterinary_care]
+hairdresser / barber:
+  types: [hair_salon, barber_shop, beauty_salon]
+aged care worker:
+  types: []
+  text_query: aged care facility
+it support:
+  types: []
+  text_query: IT services company

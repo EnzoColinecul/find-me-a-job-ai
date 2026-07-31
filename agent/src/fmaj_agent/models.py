@@ -1,10 +1,10 @@
 """Shared data models for the per-company agent."""
-from enum import StrEnum
+from enum import Enum
 
 from pydantic import BaseModel, Field
 
 
-class OpportunityType(StrEnum):
+class OpportunityType(str, Enum):
     CAREERS_PAGE = "careers_page"
     JOB_LISTING = "job_listing"
     CONTACT_EMAIL = "contact_email"
