@@ -35,6 +35,7 @@ build/
 cdk.out/
 cdk.context.json
 .terraform/
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.backup
 *.tfvars

@@ -32,4 +32,4 @@ fmt:
 	cd infra && uv run ruff format .
 
 synth:
-	cd infra && uv run cdk synth
+	cd infra && cdk synth

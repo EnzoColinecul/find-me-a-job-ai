@@ -3,7 +3,7 @@ name: Deploy
 # Merge to main -> deploy TEST automatically.
 # PROD deploys are a separate manual run (Actions tab -> "Deploy Prod" -> Run workflow),
 # so no paid GitHub plan / environment protection rule is needed.
-# Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_role.
+# Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_oidc-policy.
 
 on:
   push:

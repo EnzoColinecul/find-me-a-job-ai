@@ -2,7 +2,7 @@ name: Deploy Prod
 
 # Manual only: Actions tab -> "Deploy Prod" -> Run workflow.
 # This is the deliberate human gate for production (no paid GitHub plan needed).
-# Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_role.
+# Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_oidc-policy.
 
 on:
   workflow_dispatch:

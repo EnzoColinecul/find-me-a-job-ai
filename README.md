@@ -31,10 +31,15 @@ make lint                     # ruff + mypy + eslint
 
 ## Deploy
 
+The `cdk` CLI is a Node tool (`npm i -g aws-cdk`) — call it directly, not via `uv`.
+`cdk.json` runs the Python app for you (`uv run python app.py`).
+
 ```bash
 cd infra
-uv run cdk deploy 'Fmaj-Test/*' --profile fmaj-deploy   # test env
-uv run cdk deploy 'Fmaj-Prod/*' --profile fmaj-deploy   # prod env (via CI approval normally)
+uv sync                                                 # first time only
+cdk bootstrap aws://418862088910/ap-southeast-2 --profile fmaj-deploy   # once per account
+cdk deploy 'Fmaj-Test/*' --profile fmaj-deploy          # test env (or push to main)
+cdk deploy 'Fmaj-Prod/*' --profile fmaj-deploy          # prod env (or run Deploy Prod workflow)
 ```
 
 ## Secrets policy
