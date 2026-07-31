@@ -14,6 +14,16 @@ from fmaj_agent import secrets
 
 BASE = "https://places.googleapis.com/v1"
 
+
+class PlacesError(RuntimeError):
+    """Places API error that includes the response body (Google explains 403s there)."""
+
+
+def _check(resp: httpx.Response) -> httpx.Response:
+    if resp.is_error:
+        raise PlacesError(f"{resp.status_code} {resp.request.url}: {resp.text[:500]}")
+    return resp
+
 # Pro tier — safe for discovery volume (5K free/mo)
 SEARCH_FIELD_MASK = (
     "places.id,places.displayName,places.formattedAddress,places.location,places.types"
@@ -72,8 +82,7 @@ class PlacesClient:
             headers=self._headers(SEARCH_FIELD_MASK),
             timeout=self.timeout,
         )
-        resp.raise_for_status()
-        return resp.json().get("places", [])
+        return _check(resp).json().get("places", [])
 
     def search_text(self, query: str, lat: float, lng: float, radius_m: float) -> list[dict]:
         """Text Search (New), single page (20). Bias — results may fall outside radius."""
@@ -94,8 +103,7 @@ class PlacesClient:
             headers=self._headers(SEARCH_FIELD_MASK),
             timeout=self.timeout,
         )
-        resp.raise_for_status()
-        return resp.json().get("places", [])
+        return _check(resp).json().get("places", [])
 
     def place_details(self, place_id: str) -> dict:
         """Enterprise-tier details (websiteUri, phone). SHORTLIST ONLY — 1K free/mo."""
@@ -105,5 +113,4 @@ class PlacesClient:
             headers=self._headers(DETAILS_FIELD_MASK),
             timeout=self.timeout,
         )
-        resp.raise_for_status()
-        return resp.json()
+        return _check(resp).json()
