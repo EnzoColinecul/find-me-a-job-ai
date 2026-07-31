@@ -44,31 +44,37 @@ function RadiusCircle({ center, radiusKm }: { center: LatLng; radiusKm: number }
   return null;
 }
 
-/** Google Places autocomplete bound to a plain input. */
+/** Address autocomplete using Places API (New) — PlaceAutocompleteElement. */
 function AddressInput({ onPlace }: { onPlace: (p: LatLng) => void }) {
   const places = useMapsLibrary("places");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!places || !inputRef.current) return;
-    const ac = new places.Autocomplete(inputRef.current, {
-      fields: ["geometry.location"],
-      componentRestrictions: { country: "au" },
+    if (!places || !containerRef.current) return;
+    // PlaceAutocompleteElement is a web component (Places API New).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el: any = new (places as any).PlaceAutocompleteElement({
+      includedRegionCodes: ["au"],
     });
-    const listener = ac.addListener("place_changed", () => {
-      const loc = ac.getPlace().geometry?.location;
+    el.style.width = "100%";
+    containerRef.current.appendChild(el);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const onSelect = async (event: any) => {
+      const place = event.placePrediction.toPlace();
+      await place.fetchFields({ fields: ["location"] });
+      const loc = place.location;
       if (loc) onPlace({ lat: loc.lat(), lng: loc.lng() });
-    });
-    return () => listener.remove();
+    };
+    el.addEventListener("gmp-select", onSelect);
+
+    return () => {
+      el.removeEventListener("gmp-select", onSelect);
+      el.remove();
+    };
   }, [places, onPlace]);
 
-  return (
-    <input
-      ref={inputRef}
-      placeholder="Search an address or suburb…"
-      style={{ width: "100%", padding: "0.6rem", fontSize: "1rem" }}
-    />
-  );
+  return <div ref={containerRef} />;
 }
 
 export default function SearchForm() {
