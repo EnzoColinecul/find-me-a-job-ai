@@ -34,20 +34,27 @@ class PipelineStack(cdk.Stack):
         super().__init__(scope, construct_id, **kwargs)
         self.config = config
 
-        # Install deps as manylinux x86_64 wheels explicitly: the build host may be
-        # Apple Silicon (arm64) while the function runs on x86_64, and compiled
-        # extensions like pydantic_core fail to import on a mismatch.
+        # The build host may be Apple Silicon (arm64) while the function runs on
+        # x86_64; compiled extensions (pydantic_core) fail to import on a mismatch.
+        # Forcing the BUILD CONTAINER to linux/amd64 makes pip resolve natively for
+        # the target arch (emulated on Apple Silicon — slower but correct).
+        # The final import check fails the build loudly instead of shipping a broken
+        # bundle that only errors at Lambda cold start.
         bundle_cmd = (
+            "set -e && "
             "pip install --no-cache-dir --target /asset-output "
-            "--platform manylinux2014_x86_64 --implementation cp "
-            "--python-version 3.12 --only-binary=:all: "
-            "-r /asset-input/requirements-lambda.txt "
-            "&& cp -r /asset-input/src/fmaj_agent /asset-output/"
+            "-r /asset-input/requirements-lambda.txt && "
+            "cp -r /asset-input/src/fmaj_agent /asset-output/ && "
+            "PYTHONPATH=/asset-output python -c "
+            "'import pydantic_core._pydantic_core; print(\"bundle arch OK\")'"
         )
         code = lambda_.Code.from_asset(
             AGENT_PATH,
+            exclude=[".venv", "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache",
+                     "evals/results-*.json", "*.csv"],
             bundling=BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_12.bundling_image,
+                platform="linux/amd64",  # match Lambda architecture
                 command=["bash", "-c", bundle_cmd],
             ),
         )
