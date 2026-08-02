@@ -69,6 +69,7 @@ class PlacesClient:
         body = {
             "includedTypes": included_types,
             "maxResultCount": 20,
+            "rankPreference": "DISTANCE",  # closest first, not popularity
             "locationRestriction": {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},

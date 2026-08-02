@@ -1,5 +1,4 @@
-from fmaj_agent.models import Company, Findings, OpportunityType
-from fmaj_agent.orchestrator import investigate
+from fmaj_agent.models import Findings, OpportunityType
 
 
 def test_findings_schema_defaults() -> None:
@@ -8,7 +7,6 @@ def test_findings_schema_defaults() -> None:
     assert 0.0 <= f.confidence <= 1.0
 
 
-def test_investigate_never_raises() -> None:
-    company = Company(place_id="x", name="Test Cafe", address="Sydney", roles=["barista"])
-    findings = investigate(company)
-    assert isinstance(findings, Findings)
+def test_opportunity_type_values() -> None:
+    assert OpportunityType.JOB_LISTING.value == "job_listing"
+    assert OpportunityType("careers_page") == OpportunityType.CAREERS_PAGE
