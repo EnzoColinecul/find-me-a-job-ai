@@ -30,14 +30,22 @@ from fmaj_agent.orchestrator import investigate  # noqa: E402
 GOLDEN = Path(__file__).parent / "golden.yaml"
 
 
+# Bot-protection responses: the URL is real and a human browser opens it fine, we're
+# just being blocked. Counting these as "dead" produced false negatives (verified
+# manually with Bourke Street Bakery's careers page).
+_BLOCKED_NOT_DEAD = {401, 403, 405, 406, 409, 429, 503}
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
+
 def link_alive(url: str) -> bool:
+    headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
     try:
-        r = httpx.head(url, timeout=8, follow_redirects=True,
-                       headers={"User-Agent": "Mozilla/5.0 (eval check)"})
-        if r.status_code in (403, 405):  # some sites block HEAD
-            r = httpx.get(url, timeout=8, follow_redirects=True,
-                          headers={"User-Agent": "Mozilla/5.0 (eval check)"})
-        return r.status_code < 400
+        r = httpx.head(url, timeout=10, follow_redirects=True, headers=headers)
+        if r.status_code >= 400:  # some sites don't implement HEAD properly
+            r = httpx.get(url, timeout=10, follow_redirects=True, headers=headers)
+        return r.status_code < 400 or r.status_code in _BLOCKED_NOT_DEAD
     except Exception:
         return False
 
@@ -103,6 +111,7 @@ def main() -> None:
         rows.append({
             "case": case["name"], "expected": "|".join(case["accept"]), "got": got,
             "ok": ok, "error": run.error, "links_alive": alive_str,
+            "links": run.findings.links, "emails": run.findings.emails,
             "tool_calls": run.tool_calls, "seconds": round(run.seconds, 1),
             "evidence": run.findings.evidence[:100],
         })
