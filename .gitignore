@@ -51,3 +51,7 @@ cdk.context.json
 *.log
 coverage/
 .coverage
+
+# discovery harness output
+agent/discovery_results.csv
+*_results.csv
