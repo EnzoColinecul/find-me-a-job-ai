@@ -30,18 +30,27 @@ _robot_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
 
 
 def _allowed(url: str) -> bool:
-    """robots.txt check; on any doubt/error, allow (fail-open, we fetch few pages)."""
+    """robots.txt check; on any doubt/error, allow (fail-open, we fetch few pages).
+
+    Fetched via httpx WITH a timeout — RobotFileParser.read() uses urllib with no
+    timeout and hangs forever on hosts that black-hole bot connections.
+    """
     try:
         parts = urlparse(url)
         root = f"{parts.scheme}://{parts.netloc}"
         rp = _robot_cache.get(root)
-        if rp is None:
-            rp = urllib.robotparser.RobotFileParser()
-            rp.set_url(f"{root}/robots.txt")
+        if root not in _robot_cache:
+            rp = None
             try:
-                rp.read()
+                resp = httpx.get(f"{root}/robots.txt", timeout=5,
+                                 headers={"User-Agent": USER_AGENT},
+                                 follow_redirects=True)
+                if resp.status_code == 200:
+                    parser = urllib.robotparser.RobotFileParser()
+                    parser.parse(resp.text.splitlines())
+                    rp = parser
             except Exception:
-                rp = None  # unreadable -> allow
+                rp = None  # unreachable/unreadable -> allow
             _robot_cache[root] = rp  # type: ignore[assignment]
         return rp.can_fetch(USER_AGENT, url) if rp else True
     except Exception:

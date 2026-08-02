@@ -154,9 +154,14 @@ class GeminiProvider(Provider):
                     f.write(key_json)
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
 
+        from google.genai import types as genai_types
+
         self._genai = genai
         self._client = genai.Client(
-            vertexai=True, project=config.VERTEX_PROJECT, location=config.VERTEX_LOCATION
+            vertexai=True,
+            project=config.VERTEX_PROJECT,
+            location=config.VERTEX_LOCATION,
+            http_options=genai_types.HttpOptions(timeout=60_000),  # ms — never hang
         )
 
     def _to_contents(self, messages: list[dict]) -> list:
