@@ -6,6 +6,7 @@ Table items:
 Status: pending -> running -> completed | failed
 """
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -54,6 +55,8 @@ class SearchRequest(BaseModel):
 class QuotaExhausted(Exception):
     pass
 
+
+logger = logging.getLogger(__name__)
 
 _table = None
 _sfn = None
@@ -115,19 +118,27 @@ def create_search(sub: str, req: SearchRequest) -> dict:
     _get_table().put_item(Item=meta)
 
     if settings.state_machine_arn:
-        _get_sfn().start_execution(
-            stateMachineArn=settings.state_machine_arn,
-            name=f"search-{search_id}",
-            input=json.dumps(
-                {
-                    "search_id": search_id,
-                    "lat": req.lat,
-                    "lng": req.lng,
-                    "radius_km": req.radius_km,
-                    "roles": req.roles,
-                }
-            ),
-        )
+        try:
+            _get_sfn().start_execution(
+                stateMachineArn=settings.state_machine_arn,
+                name=f"search-{search_id}",
+                input=json.dumps(
+                    {
+                        "search_id": search_id,
+                        "lat": req.lat,
+                        "lng": req.lng,
+                        "radius_km": req.radius_km,
+                        "roles": req.roles,
+                    }
+                ),
+            )
+        except ClientError as exc:
+            # Pipeline not deployed / bad ARN: don't fail the request. The search
+            # record exists and stays "pending" — visible in the UI and logs.
+            logger.error("failed to start pipeline for %s: %s", search_id, exc)
+    else:
+        logger.warning("FMAJ_STATE_MACHINE_ARN not set — search %s stays pending",
+                       search_id)
     return meta
 
 
