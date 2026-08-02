@@ -20,6 +20,9 @@ class ToolUse:
     id: str
     name: str
     input: dict
+    # Gemini 3 returns a thought_signature on function-call parts that MUST be echoed
+    # back on the next turn (bytes). Unused by Bedrock.
+    signature: bytes | None = None
 
 
 @dataclass
@@ -151,7 +154,10 @@ class GeminiProvider(Provider):
                 if m.get("text"):
                     parts.append(types.Part.from_text(text=m["text"]))
                 for tu in m.get("tool_uses", []):
-                    parts.append(types.Part.from_function_call(name=tu.name, args=tu.input))
+                    fp = types.Part.from_function_call(name=tu.name, args=tu.input)
+                    if tu.signature is not None:
+                        fp.thought_signature = tu.signature  # required by Gemini 3
+                    parts.append(fp)
                 contents.append(types.Content(role="model", parts=parts))
             elif m["role"] == "tool":
                 parts = [types.Part.from_function_response(
@@ -190,8 +196,9 @@ class GeminiProvider(Provider):
                     turn.text += part.text
                 fc = getattr(part, "function_call", None)
                 if fc:
-                    turn.tool_uses.append(ToolUse(id=f"{fc.name}-{i}", name=fc.name,
-                                                  input=dict(fc.args or {})))
+                    turn.tool_uses.append(ToolUse(
+                        id=f"{fc.name}-{i}", name=fc.name, input=dict(fc.args or {}),
+                        signature=getattr(part, "thought_signature", None)))
         return turn
 
 
