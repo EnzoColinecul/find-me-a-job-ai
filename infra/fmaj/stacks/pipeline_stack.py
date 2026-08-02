@@ -34,14 +34,21 @@ class PipelineStack(cdk.Stack):
         super().__init__(scope, construct_id, **kwargs)
         self.config = config
 
+        # Install deps as manylinux x86_64 wheels explicitly: the build host may be
+        # Apple Silicon (arm64) while the function runs on x86_64, and compiled
+        # extensions like pydantic_core fail to import on a mismatch.
+        bundle_cmd = (
+            "pip install --no-cache-dir --target /asset-output "
+            "--platform manylinux2014_x86_64 --implementation cp "
+            "--python-version 3.12 --only-binary=:all: "
+            "-r /asset-input/requirements-lambda.txt "
+            "&& cp -r /asset-input/src/fmaj_agent /asset-output/"
+        )
         code = lambda_.Code.from_asset(
             AGENT_PATH,
             bundling=BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_12.bundling_image,
-                command=[
-                    "bash", "-c",
-                    "pip install --no-cache-dir /asset-input -t /asset-output",
-                ],
+                command=["bash", "-c", bundle_cmd],
             ),
         )
 
@@ -58,6 +65,7 @@ class PipelineStack(cdk.Stack):
                 self,
                 name,
                 runtime=lambda_.Runtime.PYTHON_3_12,
+                architecture=lambda_.Architecture.X86_64,  # must match bundled wheels
                 code=code,
                 handler=handler,
                 timeout=cdk.Duration.seconds(timeout_s),
