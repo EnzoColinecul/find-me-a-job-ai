@@ -1,4 +1,4 @@
-"""Provider-agnostic LLM layer for the agent.
+"""Provider-agnostic LLM layer for the agent.  # noqa: D400
 
 The orchestrator speaks a normalized message format; each provider converts to/from
 its native API. Swap with FMAJ_LLM_PROVIDER=bedrock|gemini.
@@ -10,9 +10,38 @@ Normalized messages (list[dict]):
 
 Provider-neutral tool defs — one JSON schema per tool, adapted per provider.
 """
+import logging
+import time
 from dataclasses import dataclass, field
 
 from fmaj_agent import config
+
+logger = logging.getLogger(__name__)
+
+# Transient failures worth retrying (DNS blips, read timeouts, 429/503 from the API).
+_RETRY_HINTS = (
+    "connecterror", "readtimeout", "timeout", "nodename", "temporarily",
+    "429", "503", "unavailable", "deadline",
+)
+_MAX_ATTEMPTS = 3
+
+
+def _with_retry(fn, what: str):
+    """Call fn(), retrying transient network/model errors with backoff."""
+    last: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: {exc}".lower()
+            if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
+                raise
+            last = exc
+            delay = 2 ** attempt  # 2s, 4s
+            logger.warning("%s transient failure (attempt %d/%d), retrying in %ds: %s",
+                           what, attempt, _MAX_ATTEMPTS, delay, exc)
+            time.sleep(delay)
+    raise last  # pragma: no cover
 
 
 @dataclass
@@ -119,7 +148,7 @@ class BedrockProvider(Provider):
             if force_tool:
                 tool_config["toolChoice"] = {"tool": {"name": force_tool}}
             kwargs["toolConfig"] = tool_config
-        resp = self._client.converse(**kwargs)
+        resp = _with_retry(lambda: self._client.converse(**kwargs), "bedrock.converse")
         usage = resp.get("usage", {})
         turn = Turn(input_tokens=usage.get("inputTokens", 0),
                     output_tokens=usage.get("outputTokens", 0))
@@ -202,9 +231,11 @@ class GeminiProvider(Provider):
             if force_tool:
                 fcc.allowed_function_names = [force_tool]
             cfg["tool_config"] = types.ToolConfig(function_calling_config=fcc)
-        resp = self._client.models.generate_content(
-            model=model, contents=self._to_contents(messages),
-            config=types.GenerateContentConfig(**cfg))
+        resp = _with_retry(
+            lambda: self._client.models.generate_content(
+                model=model, contents=self._to_contents(messages),
+                config=types.GenerateContentConfig(**cfg)),
+            "gemini.generate_content")
 
         turn = Turn()
         um = getattr(resp, "usage_metadata", None)

@@ -49,10 +49,15 @@ class AgentRun:
     output_tokens: int = 0
     seconds: float = 0.0
     trace: list[str] = field(default_factory=list)
+    # Set when the run aborted due to an infrastructure failure (network/model),
+    # NOT because the agent legitimately found nothing. Callers must not treat
+    # these as real findings.
+    error: str | None = None
 
     def stats(self) -> dict:
         return {
             "provider": config.LLM_PROVIDER,
+            "error": self.error or "",
             "tool_calls": self.tool_calls,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -159,6 +164,7 @@ def investigate(company: Company) -> AgentRun:
         run.findings = _force_report(provider, messages, run)
     except Exception as exc:  # noqa: BLE001 — one company's failure must not crash the batch
         logger.exception("agent failed for %s", company.name)
+        run.error = f"{type(exc).__name__}: {exc}"[:200]
         run.findings = Findings(
             opportunity_type=OpportunityType.NONE,
             evidence=f"agent error: {type(exc).__name__}",

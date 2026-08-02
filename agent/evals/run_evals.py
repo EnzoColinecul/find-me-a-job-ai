@@ -47,11 +47,16 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None, help="run only the first N cases")
     p.add_argument("--case", default=None, help="run a single case by (partial) name")
     p.add_argument("--no-liveness", action="store_true", help="skip link HTTP checks")
+    p.add_argument("--skip", type=int, default=0, help="skip the first N cases (resume)")
+    p.add_argument("--pause", type=float, default=2.0,
+                   help="seconds between cases (be gentle on DNS/APIs)")
     args = p.parse_args()
 
     cases = yaml.safe_load(GOLDEN.read_text())["cases"]
     if args.case:
         cases = [c for c in cases if args.case.lower() in c["name"].lower()]
+    if args.skip:
+        cases = cases[args.skip:]
     if args.limit:
         cases = cases[: args.limit]
     if not cases:
@@ -59,6 +64,7 @@ def main() -> None:
         return
 
     rows, correct, links_total, links_alive = [], 0, 0, 0
+    errors = 0
     tokens_in = tokens_out = 0
     t0 = time.monotonic()
 
@@ -71,12 +77,21 @@ def main() -> None:
             types=case.get("types", []),
             roles=case["roles"],
         )
+        if i > 1 and args.pause:
+            time.sleep(args.pause)
         run = investigate(company)
         got = run.findings.opportunity_type.value
-        ok = got in case["accept"]
-        correct += ok
         tokens_in += run.input_tokens
         tokens_out += run.output_tokens
+
+        # Infrastructure failure != a real finding. Exclude from accuracy entirely,
+        # otherwise a DNS blip silently "passes" the none-expected cases.
+        errored = run.error is not None
+        ok = (not errored) and got in case["accept"]
+        if errored:
+            errors += 1
+        else:
+            correct += ok
 
         alive_str = "-"
         if run.findings.links and not args.no_liveness:
@@ -87,25 +102,31 @@ def main() -> None:
 
         rows.append({
             "case": case["name"], "expected": "|".join(case["accept"]), "got": got,
-            "ok": ok, "links_alive": alive_str, "tool_calls": run.tool_calls,
-            "seconds": round(run.seconds, 1),
+            "ok": ok, "error": run.error, "links_alive": alive_str,
+            "tool_calls": run.tool_calls, "seconds": round(run.seconds, 1),
             "evidence": run.findings.evidence[:100],
         })
-        mark = "✅" if ok else "❌"
-        print(f"{mark} [{i}/{len(cases)}] {case['name']}: got={got} "
-              f"expected={case['accept']} tools={run.tool_calls} {run.seconds:.0f}s")
+        mark = "⚠️ " if errored else ("✅" if ok else "❌")
+        detail = f"ERROR {run.error}" if errored else f"got={got} expected={case['accept']}"
+        print(f"{mark} [{i}/{len(cases)}] {case['name']}: {detail} "
+              f"tools={run.tool_calls} {run.seconds:.0f}s")
 
-    accuracy = correct / len(cases)
+    scored = len(cases) - errors
+    accuracy = (correct / scored) if scored else 0.0
     liveness = (links_alive / links_total) if links_total else None
     summary = {
         "cases": len(cases),
+        "scored": scored,
+        "errors": errors,
         "type_accuracy": round(accuracy, 2),
         "links_alive": f"{links_alive}/{links_total}" if links_total else "n/a",
         "link_liveness": round(liveness, 2) if liveness is not None else None,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "total_seconds": round(time.monotonic() - t0, 1),
-        "pass": accuracy >= 0.75 and (liveness is None or liveness >= 0.9),
+        "pass": (scored >= max(1, len(cases) // 2)
+                 and accuracy >= 0.75
+                 and (liveness is None or liveness >= 0.9)),
     }
 
     out = Path(__file__).parent / f"results-{int(time.time())}.json"
@@ -114,6 +135,10 @@ def main() -> None:
     print("\n=== SUMMARY ===")
     print(json.dumps(summary, indent=2))
     print(f"\nDetailed results -> {out}")
+    if errors:
+        print(f"\n⚠️  {errors} case(s) errored (network/model) and were EXCLUDED from "
+              f"accuracy. Accuracy is over the {scored} that actually ran. "
+              f"Re-run them with --skip/--case.")
     if not summary["pass"]:
         print("\n⚠️ Below target (>=75% accuracy, >=90% links alive). Inspect the "
               "failing rows — stale golden labels are as likely as agent bugs.")
