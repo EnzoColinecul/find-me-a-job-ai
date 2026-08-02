@@ -136,7 +136,24 @@ class BedrockProvider(Provider):
 # ── Gemini (Google, via Vertex AI) ────────────────────────
 class GeminiProvider(Provider):
     def __init__(self) -> None:
+        import os
+
         from google import genai
+
+        # In Lambda there's no key file on disk: fetch the SA key JSON from Secrets
+        # Manager (FMAJ_GCP_SA_SECRET) and materialize it under /tmp once.
+        if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            secret_name = os.environ.get("FMAJ_GCP_SA_SECRET")
+            if secret_name:
+                import boto3
+                key_json = boto3.client(
+                    "secretsmanager", region_name=config.AWS_REGION
+                ).get_secret_value(SecretId=secret_name)["SecretString"]
+                path = "/tmp/gcp-sa.json"  # noqa: S108 — Lambda's only writable dir
+                with open(path, "w") as f:
+                    f.write(key_json)
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+
         self._genai = genai
         self._client = genai.Client(
             vertexai=True, project=config.VERTEX_PROJECT, location=config.VERTEX_LOCATION

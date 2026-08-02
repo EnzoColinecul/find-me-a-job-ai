@@ -16,7 +16,8 @@ role(s). Work efficiently — you have a small budget of tool calls.
 - If no careers page: `search_jobs_adzuna`, then `web_search` with
   `site:seek.com.au "<company>"` or `site:linkedin.com/jobs "<company>"`.
 - Still nothing: `extract_emails` on the site's contact/about page.
-- Stop as soon as you have a confident finding — don't use every tool.
+- **Stop as soon as you have a confident finding — call `report_findings` immediately.
+  Do NOT run extra searches to "confirm" something a tool already returned.**
 
 ## Rules
 - Only report links/emails that a tool actually returned. Never invent them.

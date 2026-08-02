@@ -9,6 +9,8 @@ class StageConfig:
     log_retention_days: int
     app_base_url: str              # frontend origin (used for CORS + OAuth callback)
     report_expiry_days: int = 7
+    # LLM backend for the agent: "gemini" (Vertex, GCP credits) or "bedrock"
+    llm_provider: str = "gemini"
     # Extra allowed callback origins (e.g. deployed preview URL) beyond app_base_url
     extra_callback_urls: list[str] = field(default_factory=list)
 

@@ -1,12 +1,101 @@
-# Golden eval set — 20 hand-checked companies (Notion card: "Agent eval set").
-# Fill during Phase 3. Format:
+# Golden eval set — AU companies with expected outcomes.
 #
-# - company:
-#     name: "Example Cafe"
-#     address: "1 Example St, Surry Hills NSW"
-#     website: "https://examplecafe.com.au"
-#     roles: ["barista"]
-#   expected:
-#     opportunity_type: careers_page   # careers_page | job_listing | contact_email | none
-#     links: ["https://examplecafe.com.au/careers"]
-cases: []
+# `accept` is the SET of opportunity_types counted as correct (ground truth for small
+# businesses is fuzzy; big brands are strict). "found_any" = any of
+# careers_page/job_listing/contact_email is acceptable (tests that the agent finds
+# SOMETHING actionable); use sparingly.
+#
+# NOTE: labels were seeded 2026-07-31 and can go stale — if a case fails, manually
+# re-check the company before blaming the agent, and update the label.
+
+cases:
+  # ── Big employers with well-known careers presence (strict) ──
+  - name: Merivale
+    website: https://merivale.com
+    types: [restaurant, bar]
+    roles: [chef]
+    accept: [careers_page, job_listing]
+    note: Large Sydney hospitality group, careers section well established.
+
+  - name: The Grounds of Alexandria
+    website: https://thegrounds.com.au
+    types: [restaurant, cafe]
+    roles: [barista]
+    accept: [careers_page, job_listing]
+
+  - name: Guzman y Gomez
+    website: https://www.guzmanygomez.com.au
+    types: [restaurant, meal_takeaway]
+    roles: [kitchen hand]
+    accept: [careers_page, job_listing]
+
+  - name: Grill'd
+    website: https://www.grilld.com.au
+    types: [restaurant]
+    roles: [kitchen hand]
+    accept: [careers_page, job_listing]
+
+  - name: Woolworths
+    website: https://www.woolworths.com.au
+    types: [supermarket]
+    roles: [supermarket assistant]
+    accept: [careers_page, job_listing]
+
+  - name: Coles
+    website: https://www.coles.com.au
+    types: [supermarket]
+    roles: [retail assistant]
+    accept: [careers_page, job_listing]
+
+  - name: JB Hi-Fi
+    website: https://www.jbhifi.com.au
+    types: [electronics_store]
+    roles: [retail assistant]
+    accept: [careers_page, job_listing]
+
+  - name: Bunnings Warehouse
+    website: https://www.bunnings.com.au
+    types: [hardware_store]
+    roles: [retail assistant]
+    accept: [careers_page, job_listing]
+
+  - name: Swissôtel Sydney
+    website: https://www.swissotelsydney.com.au
+    types: [hotel, restaurant]
+    roles: [chef]
+    accept: [careers_page, job_listing]
+    note: Accor group — careers likely on careers.accor.com.
+
+  - name: Solotel
+    website: https://solotel.com.au
+    types: [bar, restaurant]
+    roles: [bartender]
+    accept: [careers_page, job_listing]
+
+  # ── Smaller businesses (verified or looser) ──
+  - name: Single O Surry Hills
+    website: https://singleo.com.au
+    types: [cafe, coffee_shop]
+    roles: [barista]
+    accept: [contact_email, careers_page, job_listing]
+    note: Verified 2026-07-31 -> hr@singleo.com.au (no live listing/careers page then).
+
+  - name: Bourke Street Bakery
+    website: https://bourkestreetbakery.com.au
+    types: [bakery]
+    roles: [barista]
+    accept: [careers_page, job_listing, contact_email]
+
+  - name: Lune Croissanterie
+    website: https://www.lunecroissanterie.com
+    types: [bakery]
+    roles: [kitchen hand]
+    accept: [careers_page, job_listing, contact_email]
+
+  # ── Honesty checks ──
+  - name: Quantum Croissant Emporium 9843
+    website: null
+    types: [bakery]
+    roles: [barista]
+    accept: [none]
+    note: Fabricated company — the agent must NOT invent links/emails.

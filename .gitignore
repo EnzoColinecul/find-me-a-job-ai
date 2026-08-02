@@ -55,3 +55,6 @@ coverage/
 # discovery harness output
 agent/discovery_results.csv
 *_results.csv
+
+# eval outputs
+agent/evals/results-*.json
