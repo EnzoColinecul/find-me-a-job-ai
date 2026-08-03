@@ -1,4 +1,21 @@
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Export .env into os.environ BEFORE anything imports fmaj_agent: pydantic-settings
+# only feeds its own fields, but third-party libs read os.environ directly
+# (google.auth -> GOOGLE_APPLICATION_CREDENTIALS, fmaj_agent.config -> FMAJ_*).
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_FILE)
+
+# Google's SDK needs an absolute path; .env conveniently holds a relative one.
+_gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+if _gac and not os.path.isabs(_gac):
+    resolved = (_ENV_FILE.parent / _gac).resolve()
+    if resolved.exists():
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(resolved)
 
 
 class Settings(BaseSettings):
