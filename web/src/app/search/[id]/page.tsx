@@ -109,7 +109,24 @@ export default function SearchPage({ params }: { params: Promise<{ id: string }>
         </section>
       ))}
 
-      {!inProgress && found.length === 0 && (
+      {search.status === "failed" && (
+        <div
+          style={{
+            padding: "0.8rem 1rem",
+            border: "1px solid crimson",
+            borderRadius: 8,
+            background: "rgba(220, 20, 60, 0.1)",
+          }}
+        >
+          <strong>Something went wrong with this search.</strong>
+          <p style={{ margin: "0.4rem 0 0" }}>
+            It didn&apos;t finish, so this isn&apos;t a &quot;no results&quot; answer.
+            Please try again — if it keeps happening, the problem is on our side.
+          </p>
+        </div>
+      )}
+
+      {search.status === "completed" && found.length === 0 && (
         <p>
           No job opportunities were found within the selected search radius. Try a
           larger radius or different roles.

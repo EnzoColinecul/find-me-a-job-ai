@@ -22,9 +22,17 @@ def _load() -> dict[str, dict]:
         return yaml.safe_load(f)
 
 
-def resolve(role: str) -> RolePlan:
-    """Return the discovery plan for a role. Unknown roles -> Text Search fallback."""
-    key = role.strip().lower()
+def resolve(role) -> RolePlan:
+    """Return the discovery plan for a role. Unknown roles -> Text Search fallback.
+
+    Accepts a plain string or a RoleSpec-shaped dict: during a rolling deploy the API
+    may already send {"label": ..., "curated_key": ...} while an older Lambda is live.
+    """
+    if isinstance(role, dict):
+        role = role.get("curated_key") or role.get("label") or ""
+    elif hasattr(role, "mapping_key"):
+        role = role.mapping_key
+    key = str(role).strip().lower()
     entry = _load().get(key)
     if entry is None:
         return RolePlan(role=key, types=(), text_query=key, curated=False)
