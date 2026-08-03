@@ -17,5 +17,5 @@ export const CURATED_ROLES = [
   "it support",
 ] as const;
 
-export const MAX_ROLES = 3;
-export const RADIUS_OPTIONS_KM = [1, 5, 10] as const;
+// Limits live on the server (GET /config) so they can change without a frontend
+// release — see api/app/settings.py (max_roles, max_radius_km).

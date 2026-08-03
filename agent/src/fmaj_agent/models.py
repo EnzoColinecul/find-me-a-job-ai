@@ -11,6 +11,26 @@ class OpportunityType(str, Enum):
     NONE = "none"
 
 
+class RoleSuggestion(BaseModel):
+    """A role proposed by the LLM from the user's free-text description."""
+
+    label: str                      # what the user sees / what the agent searches for
+    curated_key: str | None = None  # role in role_mapping.yaml to borrow venue types from
+    why: str = ""
+
+
+class RoleSpec(BaseModel):
+    """A confirmed role to search for."""
+
+    label: str
+    curated_key: str | None = None
+
+    @property
+    def mapping_key(self) -> str:
+        """Which entry drives the Places types."""
+        return self.curated_key or self.label
+
+
 class Company(BaseModel):
     """Input: one company discovered via Google Places."""
 

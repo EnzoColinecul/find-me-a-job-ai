@@ -52,11 +52,38 @@ def test_validation_rejects_outside_australia() -> None:
         SearchRequest(lat=51.5, lng=-0.12, radius_km=5, roles=["chef"])  # London
 
 
-def test_validation_rejects_big_radius_and_many_roles() -> None:
+def test_validation_rejects_big_radius() -> None:
     with pytest.raises(ValidationError):
         SearchRequest(**{**VALID, "radius_km": 50})
+
+
+def test_role_cap_is_config_driven(monkeypatch) -> None:
+    """max_roles is a single knob — raising it must not need code changes."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "max_roles", 1)
     with pytest.raises(ValidationError):
-        SearchRequest(**{**VALID, "roles": ["a", "b", "c", "d"]})
+        SearchRequest(**{**VALID, "roles": ["chef", "barista"]})
+
+    monkeypatch.setattr(settings, "max_roles", 3)
+    req = SearchRequest(**{**VALID, "roles": ["chef", "barista"]})
+    assert [r.label for r in req.roles] == ["chef", "barista"]
+
+
+def test_roles_accept_strings_and_specs() -> None:
+    plain = SearchRequest(**VALID)
+    assert plain.roles[0].label == "chef" and plain.roles[0].curated_key is None
+
+    spec = SearchRequest(**{**VALID,
+                            "roles": [{"label": "Dishwasher",
+                                       "curated_key": "kitchen hand"}]})
+    assert spec.roles[0].label == "dishwasher"  # normalized
+    assert spec.roles[0].curated_key == "kitchen hand"
+
+
+def test_duplicate_roles_deduped() -> None:
+    req = SearchRequest(**{**VALID, "roles": ["Chef", "chef"]})
+    assert len(req.roles) == 1
 
 
 def test_create_search_consumes_quota(table) -> None:

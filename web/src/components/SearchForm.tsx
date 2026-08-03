@@ -9,8 +9,14 @@ import {
   useMapsLibrary,
 } from "@vis.gl/react-google-maps";
 import { useRouter } from "next/navigation";
-import { createSearch } from "@/lib/api";
-import { CURATED_ROLES, MAX_ROLES, RADIUS_OPTIONS_KM } from "@/lib/roles";
+import {
+  createSearch,
+  getConfig,
+  interpretRoles,
+  type AppConfig,
+  type RoleSuggestion,
+} from "@/lib/api";
+import { CURATED_ROLES } from "@/lib/roles";
 
 const MAPS_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY!;
 const SYDNEY = { lat: -33.8688, lng: 151.2093 };
@@ -81,29 +87,73 @@ export default function SearchForm() {
   const router = useRouter();
   const [center, setCenter] = useState<LatLng>(SYDNEY);
   const [radiusKm, setRadiusKm] = useState<number>(5);
-  const [roles, setRoles] = useState<string[]>([]);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+
+  const [text, setText] = useState("");
+  const [suggestions, setSuggestions] = useState<RoleSuggestion[] | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [interpreting, setInterpreting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const toggleRole = (role: string) => {
-    setRoles((prev) =>
-      prev.includes(role)
-        ? prev.filter((r) => r !== role)
-        : prev.length < MAX_ROLES
-          ? [...prev, role]
-          : prev,
-    );
+  useEffect(() => {
+    getConfig().then(setConfig).catch(() => setConfig(null));
+  }, []);
+
+  const maxRoles = config?.max_roles ?? 1;
+  const radiusOptions = config?.radius_options_km ?? [1, 5, 10];
+
+  const interpret = async () => {
+    if (!text.trim()) return;
+    setInterpreting(true);
+    setError(null);
+    try {
+      const res = await interpretRoles(text);
+      setSuggestions(res.roles);
+      // preselect as many as the plan allows, in the LLM's priority order
+      setSelected(res.roles.slice(0, res.max_roles).map((r) => r.label));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInterpreting(false);
+    }
+  };
+
+  const toggleSelected = (label: string) => {
+    setSelected((prev) => {
+      if (prev.includes(label)) return prev.filter((r) => r !== label);
+      if (prev.length >= maxRoles) {
+        // at the cap: replace the oldest so a single-role plan feels like "pick one"
+        return maxRoles === 1 ? [label] : [...prev.slice(1), label];
+      }
+      return [...prev, label];
+    });
+  };
+
+  const addCurated = (role: string) => {
+    setSuggestions((prev) => {
+      const list = prev ?? [];
+      return list.some((r) => r.label === role)
+        ? list
+        : [...list, { label: role, curated_key: role, why: "You picked this one." }];
+    });
+    toggleSelected(role);
   };
 
   const submit = async () => {
     setSubmitting(true);
     setError(null);
     try {
+      const roles = selected.map((label) => {
+        const s = suggestions?.find((r) => r.label === label);
+        return { label, curated_key: s?.curated_key ?? null };
+      });
       const id = await createSearch({
         lat: center.lat,
         lng: center.lng,
         radius_km: radiusKm,
         roles,
+        query_text: text.trim() || undefined,
       });
       router.push(`/search/${id}`);
     } catch (e) {
@@ -136,7 +186,7 @@ export default function SearchForm() {
             value={radiusKm}
             onChange={(e) => setRadiusKm(Number(e.target.value))}
           >
-            {RADIUS_OPTIONS_KM.map((km) => (
+            {radiusOptions.map((km) => (
               <option key={km} value={km}>
                 {km} km
               </option>
@@ -145,36 +195,93 @@ export default function SearchForm() {
         </label>
 
         <div>
-          <p style={{ margin: "0 0 0.4rem" }}>
-            Roles (up to {MAX_ROLES}):{" "}
-            <strong>{roles.join(", ") || "none selected"}</strong>
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-            {CURATED_ROLES.map((role) => (
-              <button
-                key={role}
-                type="button"
-                onClick={() => toggleRole(role)}
-                style={{
-                  padding: "0.35rem 0.7rem",
-                  borderRadius: 999,
-                  border: "1px solid #ccc",
-                  background: roles.includes(role) ? "#2563eb" : "transparent",
-                  color: roles.includes(role) ? "#fff" : "inherit",
-                  cursor: "pointer",
-                }}
-              >
-                {role}
-              </button>
-            ))}
-          </div>
+          <label htmlFor="what" style={{ display: "block", marginBottom: "0.3rem" }}>
+            What kind of work are you looking for?
+          </label>
+          <textarea
+            id="what"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="e.g. I'd like to work in a restaurant — I've done some kitchen work before"
+            rows={3}
+            style={{ width: "100%", padding: "0.6rem", fontSize: "1rem",
+                     fontFamily: "inherit" }}
+          />
+          <button
+            type="button"
+            onClick={interpret}
+            disabled={interpreting || !text.trim()}
+            style={{ marginTop: "0.4rem", padding: "0.5rem 0.9rem" }}
+          >
+            {interpreting ? "Thinking…" : suggestions ? "Re-interpret" : "Continue"}
+          </button>
         </div>
+
+        {suggestions && (
+          <div>
+            <p style={{ margin: "0 0 0.4rem" }}>
+              We&apos;ll search for{" "}
+              <strong>{selected.join(", ") || "…pick one"}</strong>
+              {maxRoles === 1
+                ? " — choose one role for this search."
+                : ` — up to ${maxRoles} roles.`}
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+              {suggestions.map((s) => {
+                const on = selected.includes(s.label);
+                return (
+                  <button
+                    key={s.label}
+                    type="button"
+                    title={s.why}
+                    onClick={() => toggleSelected(s.label)}
+                    style={{
+                      padding: "0.35rem 0.7rem",
+                      borderRadius: 999,
+                      border: `1px solid ${on ? "#2563eb" : "#ccc"}`,
+                      background: on ? "#2563eb" : "transparent",
+                      color: on ? "#fff" : "inherit",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {on ? "✓ " : ""}
+                    {s.label}
+                  </button>
+                );
+              })}
+            </div>
+            <details style={{ marginTop: "0.6rem" }}>
+              <summary style={{ cursor: "pointer", color: "#888" }}>
+                Or pick a common role
+              </summary>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem",
+                            marginTop: "0.4rem" }}>
+                {CURATED_ROLES.filter(
+                  (r) => !suggestions.some((s) => s.label === r),
+                ).map((role) => (
+                  <button
+                    key={role}
+                    type="button"
+                    onClick={() => addCurated(role)}
+                    style={{
+                      padding: "0.3rem 0.6rem", borderRadius: 999,
+                      border: "1px dashed #999", background: "transparent",
+                      color: "inherit", cursor: "pointer", fontSize: "0.9rem",
+                    }}
+                  >
+                    + {role}
+                  </button>
+                ))}
+              </div>
+            </details>
+          </div>
+        )}
 
         {error && <p style={{ color: "crimson", margin: 0 }}>{error}</p>}
 
         <button
           onClick={submit}
-          disabled={submitting || roles.length === 0}
+          disabled={submitting || selected.length === 0}
           style={{ padding: "0.7rem", fontSize: "1rem" }}
         >
           {submitting ? "Starting search…" : "Find jobs near here"}

@@ -9,7 +9,12 @@ dependencies = [
     "pydantic-settings>=2.6",
     "boto3>=1.35",
     "pyjwt[crypto]>=2.9",
+    "fmaj-agent",
 ]
+
+# The API reuses the agent package for role interpretation (one small LLM call).
+[tool.uv.sources]
+fmaj-agent = { path = "../agent", editable = true }
 
 [dependency-groups]
 dev = [

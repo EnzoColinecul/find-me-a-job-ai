@@ -54,7 +54,7 @@ def discover_handler(event: dict, _context=None) -> dict:
         lat=float(event["lat"]),
         lng=float(event["lng"]),
         radius_km=float(event["radius_km"]),
-        roles=list(event["roles"]),
+        roles=list(event["roles"]),  # RoleSpec dicts (or legacy plain strings)
     )
     for company in result.companies:
         table.put_item(Item={

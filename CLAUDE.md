@@ -89,6 +89,19 @@ Tests: api 10, agent 20 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
 
+## Role input (free text → LLM → confirm)
+
+Users describe what they want in their own words; `POST /roles/interpret` (auth, **no
+quota consumed**) returns ordered `RoleSuggestion`s they edit/confirm before the search
+runs. Each suggestion carries `curated_key` — the `role_mapping.yaml` role whose Places
+types to borrow — so a label we've never seen ("dishwasher") still searches the right
+venues instead of Text-Searching appliance stores. Falls back to the raw text as one
+role if the LLM output is unusable.
+
+**`max_roles` is one knob** (`api/app/settings.py`, PoC = 1). The API validates against
+it and the frontend *fetches* it from `GET /config` — raising it for subscriptions needs
+no code change. Never hardcode role/radius limits in the frontend.
+
 ## Data model (DynamoDB single table `fmaj-{stage}-main`, PK/SK)
 
 - `USER#<cognito-sub> / PROFILE`: email, name, `free_search_used` (quota = atomic

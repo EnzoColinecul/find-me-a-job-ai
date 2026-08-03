@@ -12,22 +12,48 @@ from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.settings import settings
 
 # rough Australia bounding box (PoC market restriction)
 AU_LAT = (-44.0, -9.5)
 AU_LNG = (112.0, 154.5)
-MAX_ROLES = 3
-MAX_RADIUS_KM = 10.0
+
+
+class RoleSpec(BaseModel):
+    """A role to search for. `curated_key` borrows venue types from a known role."""
+
+    label: str
+    curated_key: str | None = None
 
 
 class SearchRequest(BaseModel):
     lat: float
     lng: float
-    radius_km: float = Field(gt=0, le=MAX_RADIUS_KM)
-    roles: list[str] = Field(min_length=1, max_length=MAX_ROLES)
+    radius_km: float = Field(gt=0)
+    # Free-text the user typed, kept for analytics/eval (what did they ask for vs
+    # what did the LLM propose vs what did they confirm).
+    query_text: str | None = None
+    roles: list[RoleSpec] = Field(min_length=1)
+
+    @field_validator("roles", mode="before")
+    @classmethod
+    def _coerce_roles(cls, v):
+        """Accept ["chef"] as well as [{"label": "chef", "curated_key": ...}]."""
+        if isinstance(v, list):
+            return [{"label": r} if isinstance(r, str) else r for r in v]
+        return v
+
+    @model_validator(mode="after")
+    def _within_limits(self):
+        if len(self.roles) > settings.max_roles:
+            raise ValueError(
+                f"At most {settings.max_roles} role(s) per search on your current plan"
+            )
+        if self.radius_km > settings.max_radius_km:
+            raise ValueError(f"Radius must be <= {settings.max_radius_km} km")
+        return self
 
     @field_validator("lat")
     @classmethod
@@ -45,11 +71,16 @@ class SearchRequest(BaseModel):
 
     @field_validator("roles")
     @classmethod
-    def _clean_roles(cls, v: list[str]) -> list[str]:
-        cleaned = [r.strip().lower() for r in v if r.strip()]
+    def _clean_roles(cls, v: list[RoleSpec]) -> list[RoleSpec]:
+        cleaned, seen = [], set()
+        for r in v:
+            label = r.label.strip().lower()
+            if label and label not in seen:
+                seen.add(label)
+                cleaned.append(RoleSpec(label=label, curated_key=r.curated_key))
         if not cleaned:
             raise ValueError("At least one role required")
-        return cleaned[:MAX_ROLES]
+        return cleaned
 
 
 class QuotaExhausted(Exception):
@@ -111,7 +142,8 @@ def create_search(sub: str, req: SearchRequest) -> dict:
         "lat": str(req.lat),
         "lng": str(req.lng),
         "radius_km": str(req.radius_km),
-        "roles": req.roles,
+        "roles": [r.model_dump() for r in req.roles],
+        "query_text": req.query_text or "",
         "status": "pending",
         "created_at": now,
     }
@@ -128,7 +160,7 @@ def create_search(sub: str, req: SearchRequest) -> dict:
                         "lat": req.lat,
                         "lng": req.lng,
                         "radius_km": req.radius_km,
-                        "roles": req.roles,
+                        "roles": [r.model_dump() for r in req.roles],
                     }
                 ),
             )
@@ -160,7 +192,10 @@ def get_search(sub: str, search_id: str) -> dict | None:
             "lat": float(meta["lat"]),
             "lng": float(meta["lng"]),
             "radius_km": float(meta["radius_km"]),
-            "roles": list(meta["roles"]),
+            # roles are stored as dicts now, but older searches hold plain strings
+            "roles": [r["label"] if isinstance(r, dict) else r
+                      for r in meta.get("roles", [])],
+            "query_text": meta.get("query_text", ""),
         },
         "created_at": meta["created_at"],
         "results": [

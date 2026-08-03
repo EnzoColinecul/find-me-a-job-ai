@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
+from pydantic import BaseModel
 
 logger = logging.getLogger("fmaj")
 
@@ -37,6 +38,36 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "stage": settings.stage}
+
+
+@app.get("/config")
+def get_config() -> dict:
+    """Client-visible limits. The frontend reads these instead of hardcoding them,
+    so raising max_roles (e.g. with subscriptions) needs no frontend change."""
+    return {
+        "max_roles": settings.max_roles,
+        "max_radius_km": settings.max_radius_km,
+        "radius_options_km": [1, 5, 10],
+    }
+
+
+class InterpretRequest(BaseModel):
+    text: str
+
+
+@app.post("/roles/interpret")
+def interpret(req: InterpretRequest, user: AuthUser = Depends(require_user)) -> dict:
+    """Turn the user's free-text description into role suggestions to confirm.
+
+    Does NOT consume the free-search quota — users can rephrase as often as they like.
+    """
+    from fmaj_agent.interpret import interpret_roles
+
+    suggestions = interpret_roles(req.text)
+    return {
+        "roles": [s.model_dump() for s in suggestions],
+        "max_roles": settings.max_roles,
+    }
 
 
 @app.get("/me")

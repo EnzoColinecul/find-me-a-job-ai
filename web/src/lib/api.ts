@@ -21,11 +21,27 @@ export async function getMe(): Promise<Me | null> {
   return resp.json();
 }
 
+export interface RoleSpec {
+  label: string;
+  curated_key?: string | null;
+}
+
+export interface RoleSuggestion extends RoleSpec {
+  why?: string;
+}
+
+export interface AppConfig {
+  max_roles: number;
+  max_radius_km: number;
+  radius_options_km: number[];
+}
+
 export interface SearchParams {
   lat: number;
   lng: number;
   radius_km: number;
-  roles: string[];
+  roles: RoleSpec[];
+  query_text?: string;
 }
 
 export interface SearchResult {
@@ -71,6 +87,25 @@ export async function createSearch(params: SearchParams): Promise<string> {
   if (!resp.ok) throw new Error(`Search failed: ${resp.status}`);
   const data = await resp.json();
   return data.search_id;
+}
+
+/** Limits come from the server so raising them needs no frontend change. */
+export async function getConfig(): Promise<AppConfig> {
+  const resp = await fetch(`${API_URL}/config`);
+  if (!resp.ok) throw new Error(`config failed: ${resp.status}`);
+  return resp.json();
+}
+
+/** Ask the LLM to turn a free-text description into role suggestions. Free (no quota). */
+export async function interpretRoles(
+  text: string,
+): Promise<{ roles: RoleSuggestion[]; max_roles: number }> {
+  const resp = await authed("/roles/interpret", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+  if (!resp.ok) throw new Error(`Could not interpret that: ${resp.status}`);
+  return resp.json();
 }
 
 export async function getSearch(searchId: string): Promise<Search> {

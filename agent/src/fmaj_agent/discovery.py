@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 
 from fmaj_agent import mapping
-from fmaj_agent.models import Company
+from fmaj_agent.models import Company, RoleSpec
 from fmaj_agent.places import PlacesClient
 
 logger = logging.getLogger(__name__)
@@ -46,11 +46,24 @@ def _to_candidate(place: dict, roles: list[str]) -> dict:
     }
 
 
+def _as_specs(roles: list) -> list[RoleSpec]:
+    """Accept plain strings (legacy) or RoleSpec/dicts."""
+    specs = []
+    for r in roles:
+        if isinstance(r, RoleSpec):
+            specs.append(r)
+        elif isinstance(r, dict):
+            specs.append(RoleSpec(**r))
+        else:
+            specs.append(RoleSpec(label=str(r)))
+    return specs
+
+
 def discover(
     lat: float,
     lng: float,
     radius_km: float,
-    roles: list[str],
+    roles: list,
     client: PlacesClient | None = None,
     max_companies: int = MAX_COMPANIES,
     fetch_details: bool = True,
@@ -58,16 +71,21 @@ def discover(
     client = client or PlacesClient()
     radius_m = radius_km * 1000
     candidates: dict[str, dict] = {}
+    specs = _as_specs(roles)
+    labels = [s.label for s in specs]
 
-    for role in roles:
-        plan = mapping.resolve(role)
+    for spec in specs:
+        # venue types come from the curated key; the label is what the agent hunts for
+        plan = mapping.resolve(spec.mapping_key)
+        if not plan.curated and spec.label != spec.mapping_key:
+            plan = mapping.resolve(spec.label)
         raw: list[dict] = []
         if plan.types:
             raw.extend(client.search_nearby(lat, lng, radius_m, list(plan.types)))
         if plan.text_query:
             raw.extend(client.search_text(plan.text_query, lat, lng, radius_m))
         for place in raw:
-            cand = _to_candidate(place, roles)
+            cand = _to_candidate(place, labels)
             if cand["lat"] is None or not cand["name"]:
                 continue
             existing = candidates.get(cand["place_id"])

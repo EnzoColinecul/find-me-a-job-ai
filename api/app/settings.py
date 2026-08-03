@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     state_machine_arn: str = ""
     cors_origins: str = "http://localhost:3000"
 
+    # Roles a user may run in ONE search. PoC = 1; raise when subscriptions land.
+    # Single source of truth: the API validates against it and the frontend fetches
+    # it from GET /config, so changing this value alone changes the whole product.
+    max_roles: int = 1
+    max_radius_km: float = 10.0
+
     model_config = {"env_prefix": "FMAJ_", "env_file": ".env", "extra": "ignore"}
 
 
