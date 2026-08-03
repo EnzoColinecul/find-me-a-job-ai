@@ -95,6 +95,7 @@ export default function SearchForm() {
   const [interpreting, setInterpreting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     getConfig().then(setConfig).catch(() => setConfig(null));
@@ -109,6 +110,14 @@ export default function SearchForm() {
     setError(null);
     try {
       const res = await interpretRoles(text);
+      if (!res.ok || res.roles.length === 0) {
+        // Don't fabricate a role out of their sentence — ask them to rephrase.
+        setSuggestions(null);
+        setSelected([]);
+        setNotice(res.message || "Please try describing the work differently.");
+        return;
+      }
+      setNotice(null);
       setSuggestions(res.roles);
       // preselect as many as the plan allows, in the LLM's priority order
       setSelected(res.roles.slice(0, res.max_roles).map((r) => r.label));
@@ -216,6 +225,20 @@ export default function SearchForm() {
             {interpreting ? "Thinking…" : suggestions ? "Re-interpret" : "Continue"}
           </button>
         </div>
+
+        {notice && (
+          <div
+            role="status"
+            style={{
+              padding: "0.7rem 0.9rem",
+              border: "1px solid #b45309",
+              background: "rgba(180, 83, 9, 0.12)",
+              borderRadius: 8,
+            }}
+          >
+            ⚠️ {notice}
+          </div>
+        )}
 
         {suggestions && (
           <div>

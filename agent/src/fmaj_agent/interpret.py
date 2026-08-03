@@ -10,6 +10,7 @@ types we borrow. That keeps discovery quality high even for labels we've never s
 """
 import json
 import logging
+from dataclasses import dataclass
 
 from fmaj_agent import config, mapping
 from fmaj_agent.models import RoleSuggestion
@@ -38,17 +39,42 @@ Rules:
 - Only propose roles the person could plausibly do based on what they said.
   Do not invent seniority or skills they never mentioned.
 - Keep labels short, lowercase, and in the language of the description.
+- If the description is too vague to name any concrete job role (e.g. "I need a job",
+  "anything", "help me"), return an EMPTY roles array. Do not guess.
 
 Respond with ONLY this JSON:
 {{"roles": [{{"label": "...", "curated_key": "..." | null, "why": "short reason"}}]}}
 """
 
+VAGUE_MESSAGE = (
+    "We couldn't work out specific job roles from that. Try naming the kind of work "
+    "or workplace — for example \"kitchen work in cafes\" or \"driving deliveries\"."
+)
+ERROR_MESSAGE = (
+    "We couldn't process that just now. Please try again in a moment."
+)
 
-def interpret_roles(text: str) -> list[RoleSuggestion]:
-    """Free text -> ordered role suggestions. Never raises; falls back to the raw text."""
+
+@dataclass
+class Interpretation:
+    """Result of interpreting free text.
+
+    `ok=False` means we have nothing usable to search — the caller must show `message`
+    and ask the user to rephrase. We deliberately do NOT fall back to searching their
+    raw sentence: "i want to work as a software developer in my next role" is not a
+    role and would produce a meaningless search.
+    """
+
+    roles: list[RoleSuggestion]
+    ok: bool = True
+    message: str = ""
+
+
+def interpret_roles(text: str) -> Interpretation:
+    """Free text -> ordered role suggestions. Never raises."""
     text = (text or "").strip()
     if not text:
-        return []
+        return Interpretation(roles=[], ok=False, message=VAGUE_MESSAGE)
 
     curated = "\n".join(f"- {r}" for r in mapping.curated_roles())
     prompt = _PROMPT.format(text=text[:1500], curated=curated,
@@ -76,11 +102,9 @@ def interpret_roles(text: str) -> list[RoleSuggestion]:
             out.append(RoleSuggestion(label=label, curated_key=key,
                                       why=str(item.get("why", ""))[:140]))
         if out:
-            return out
-        logger.warning("interpretation produced no usable roles for %r", text[:80])
+            return Interpretation(roles=out)
+        logger.info("input too vague to interpret: %r", text[:80])
+        return Interpretation(roles=[], ok=False, message=VAGUE_MESSAGE)
     except Exception:  # noqa: BLE001 — never block the user on interpretation
         logger.exception("role interpretation failed")
-
-    # Fallback: treat their text as a single role (Text Search will handle it).
-    return [RoleSuggestion(label=text[:60].lower(), curated_key=None,
-                           why="Using your words as the search term.")]
+        return Interpretation(roles=[], ok=False, message=ERROR_MESSAGE)

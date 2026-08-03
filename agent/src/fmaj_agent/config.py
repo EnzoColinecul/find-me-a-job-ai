@@ -9,8 +9,10 @@ ADZUNA_SECRET = f"fmaj/{STAGE}/adzuna"
 WEB_SEARCH_SECRET = f"fmaj/{STAGE}/web-search-key"  # SerpAPI
 
 # ── LLM provider ──────────────────────────────────────────
-# "bedrock" (Anthropic Claude) or "gemini" (Google, via Vertex AI).
-LLM_PROVIDER = os.environ.get("FMAJ_LLM_PROVIDER", "bedrock")
+# "gemini" (Google, via Vertex AI) or "bedrock" (Anthropic Claude).
+# Default is gemini: Bedrock access is pending the Anthropic use-case form, and GCP
+# credits are funding the PoC. Switch with FMAJ_LLM_PROVIDER=bedrock when approved.
+LLM_PROVIDER = os.environ.get("FMAJ_LLM_PROVIDER", "gemini")
 
 # Bedrock model IDs (AU cross-region inference profiles). Override via env if the
 # version suffix differs in your account (Bedrock console → Cross-region inference).

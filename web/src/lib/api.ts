@@ -99,7 +99,12 @@ export async function getConfig(): Promise<AppConfig> {
 /** Ask the LLM to turn a free-text description into role suggestions. Free (no quota). */
 export async function interpretRoles(
   text: string,
-): Promise<{ roles: RoleSuggestion[]; max_roles: number }> {
+): Promise<{
+  roles: RoleSuggestion[];
+  ok: boolean;
+  message: string;
+  max_roles: number;
+}> {
   const resp = await authed("/roles/interpret", {
     method: "POST",
     body: JSON.stringify({ text }),

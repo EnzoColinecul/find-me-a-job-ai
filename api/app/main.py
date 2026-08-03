@@ -63,9 +63,11 @@ def interpret(req: InterpretRequest, user: AuthUser = Depends(require_user)) -> 
     """
     from fmaj_agent.interpret import interpret_roles
 
-    suggestions = interpret_roles(req.text)
+    result = interpret_roles(req.text)
     return {
-        "roles": [s.model_dump() for s in suggestions],
+        "roles": [s.model_dump() for s in result.roles],
+        "ok": result.ok,
+        "message": result.message,
         "max_roles": settings.max_roles,
     }
 
