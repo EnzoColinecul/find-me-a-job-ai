@@ -70,6 +70,27 @@ class Interpretation:
     message: str = ""
 
 
+def _parse_json(raw: str | None) -> dict | None:
+    """Tolerant JSON extraction: handles ```json fences, prose wrappers, empty text."""
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.startswith("```"):  # strip markdown fence
+        text = text.split("```")[1] if "```" in text[3:] else text[3:]
+        text = text.removeprefix("json").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
 def interpret_roles(text: str) -> Interpretation:
     """Free text -> ordered role suggestions. Never raises."""
     text = (text or "").strip()
@@ -84,10 +105,16 @@ def interpret_roles(text: str) -> Interpretation:
     try:
         turn = get_provider().complete(
             "", [{"role": "user", "text": prompt}],
-            model=model, use_tools=False, max_tokens=600,
+            model=model, use_tools=False,
+            # Gemini 3 spends part of the budget on thinking tokens — too small a
+            # limit returns empty text and nothing to parse.
+            max_tokens=2048, json_mode=True,
         )
-        raw = turn.text
-        data = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+        data = _parse_json(turn.text)
+        if data is None:
+            logger.warning("interpretation returned unparseable output: %r",
+                           (turn.text or "")[:200])
+            return Interpretation(roles=[], ok=False, message=ERROR_MESSAGE)
         out: list[RoleSuggestion] = []
         seen: set[str] = set()
         for item in data.get("roles", [])[:MAX_SUGGESTIONS]:

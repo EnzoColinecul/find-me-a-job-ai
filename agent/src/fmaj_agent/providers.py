@@ -101,7 +101,8 @@ TOOLS = [
 class Provider:
     def complete(self, system: str, messages: list[dict], *, model: str,
                  use_tools: bool = True, force_tool: str | None = None,
-                 max_tokens: int = 1024) -> Turn:
+                 max_tokens: int = 1024, json_mode: bool = False) -> Turn:
+        """json_mode: ask the provider to guarantee a JSON response where supported."""
         raise NotImplementedError
 
 
@@ -133,7 +134,8 @@ class BedrockProvider(Provider):
         return out
 
     def complete(self, system, messages, *, model, use_tools=True,
-                 force_tool=None, max_tokens=1024) -> Turn:
+                 force_tool=None, max_tokens=1024, json_mode=False) -> Turn:
+        # Claude has no JSON mode flag; the prompt already demands JSON.
         kwargs = {
             "modelId": model,
             "messages": self._to_messages(messages),
@@ -217,11 +219,15 @@ class GeminiProvider(Provider):
         return contents
 
     def complete(self, system, messages, *, model, use_tools=True,
-                 force_tool=None, max_tokens=1024) -> Turn:
+                 force_tool=None, max_tokens=1024, json_mode=False) -> Turn:
         from google.genai import types
         cfg: dict = {"temperature": 0, "max_output_tokens": max_tokens}
         if system:
             cfg["system_instruction"] = system
+        if json_mode and not use_tools:
+            # Guarantees parseable output. Gemini 3 spends part of the token budget on
+            # thinking, so callers should also allow generous max_tokens.
+            cfg["response_mime_type"] = "application/json"
         if use_tools:
             cfg["tools"] = [types.Tool(function_declarations=[
                 types.FunctionDeclaration(name=t["name"], description=t["description"],
