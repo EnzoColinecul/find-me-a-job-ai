@@ -17,9 +17,22 @@ import {
   type RoleSuggestion,
 } from "@/lib/api";
 import { CURATED_ROLES } from "@/lib/roles";
+import { Button, Card, Pill } from "@/components/ui";
 
 const MAPS_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY!;
 const SYDNEY = { lat: -33.8688, lng: 151.2093 };
+
+/**
+ * Google Maps' Circle takes literal colour strings, not CSS classes, so the
+ * token has to be read off the document at runtime rather than hardcoded.
+ */
+function token(name: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  return (
+    getComputedStyle(document.documentElement).getPropertyValue(name).trim() ||
+    fallback
+  );
+}
 
 type LatLng = { lat: number; lng: number };
 
@@ -31,11 +44,12 @@ function RadiusCircle({ center, radiusKm }: { center: LatLng; radiusKm: number }
   useEffect(() => {
     if (!map) return;
     if (!circleRef.current) {
+      const accent = token("--color-accent", "#3d6fb5");
       circleRef.current = new google.maps.Circle({
         map,
-        strokeColor: "#2563eb",
+        strokeColor: accent,
         strokeWeight: 2,
-        fillColor: "#2563eb",
+        fillColor: accent,
         fillOpacity: 0.12,
       });
     }
@@ -173,10 +187,10 @@ export default function SearchForm() {
 
   return (
     <APIProvider apiKey={MAPS_KEY}>
-      <div style={{ display: "grid", gap: "0.75rem" }}>
+      <div className="grid gap-3">
         <AddressInput onPlace={setCenter} />
 
-        <div style={{ height: 360, borderRadius: 8, overflow: "hidden" }}>
+        <div className="h-90 overflow-hidden rounded-panel border border-line">
           <Map
             defaultZoom={13}
             center={center}
@@ -189,22 +203,28 @@ export default function SearchForm() {
           </Map>
         </div>
 
-        <label>
-          Radius:{" "}
-          <select
-            value={radiusKm}
-            onChange={(e) => setRadiusKm(Number(e.target.value))}
-          >
+        <fieldset className="m-0 border-0 p-0">
+          <legend className="mb-1.5 text-[13px] font-semibold text-ink">
+            Search radius
+          </legend>
+          <div className="flex flex-wrap gap-2">
             {radiusOptions.map((km) => (
-              <option key={km} value={km}>
+              <Pill
+                key={km}
+                selected={radiusKm === km}
+                onClick={() => setRadiusKm(km)}
+              >
                 {km} km
-              </option>
+              </Pill>
             ))}
-          </select>
-        </label>
+          </div>
+        </fieldset>
 
         <div>
-          <label htmlFor="what" style={{ display: "block", marginBottom: "0.3rem" }}>
+          <label
+            htmlFor="what"
+            className="mb-1.5 block text-[13px] font-semibold text-ink"
+          >
             What kind of work are you looking for?
           </label>
           <textarea
@@ -213,102 +233,83 @@ export default function SearchForm() {
             onChange={(e) => setText(e.target.value)}
             placeholder="e.g. I'd like to work in a restaurant — I've done some kitchen work before"
             rows={3}
-            style={{ width: "100%", padding: "0.6rem", fontSize: "1rem",
-                     fontFamily: "inherit" }}
+            className="w-full rounded-panel border border-line bg-surface-plain px-3.5 py-3 text-sm text-ink placeholder:text-slate-muted focus-visible:border-accent-strong focus-visible:outline-none"
           />
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
+            className="mt-2"
             onClick={interpret}
             disabled={interpreting || !text.trim()}
-            style={{ marginTop: "0.4rem", padding: "0.5rem 0.9rem" }}
           >
             {interpreting ? "Thinking…" : suggestions ? "Re-interpret" : "Continue"}
-          </button>
+          </Button>
         </div>
 
         {notice && (
-          <div
-            role="status"
-            style={{
-              padding: "0.7rem 0.9rem",
-              border: "1px solid #b45309",
-              background: "rgba(180, 83, 9, 0.12)",
-              borderRadius: 8,
-            }}
-          >
-            ⚠️ {notice}
-          </div>
+          <Card role="status" className="border-warn/45 bg-warn/10 px-3.5 py-3">
+            <span className="text-[13px] text-ink">⚠️ {notice}</span>
+          </Card>
         )}
 
         {suggestions && (
           <div>
-            <p style={{ margin: "0 0 0.4rem" }}>
+            <p className="m-0 mb-2 text-[13px] text-slate-muted">
               We&apos;ll search for{" "}
-              <strong>{selected.join(", ") || "…pick one"}</strong>
+              <strong className="text-ink">
+                {selected.join(", ") || "…pick one"}
+              </strong>
               {maxRoles === 1
                 ? " — choose one role for this search."
                 : ` — up to ${maxRoles} roles.`}
             </p>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+            <div className="flex flex-wrap gap-2">
               {suggestions.map((s) => {
                 const on = selected.includes(s.label);
                 return (
-                  <button
+                  <Pill
                     key={s.label}
-                    type="button"
                     title={s.why}
+                    selected={on}
                     onClick={() => toggleSelected(s.label)}
-                    style={{
-                      padding: "0.35rem 0.7rem",
-                      borderRadius: 999,
-                      border: `1px solid ${on ? "#2563eb" : "#ccc"}`,
-                      background: on ? "#2563eb" : "transparent",
-                      color: on ? "#fff" : "inherit",
-                      cursor: "pointer",
-                    }}
                   >
                     {on ? "✓ " : ""}
                     {s.label}
-                  </button>
+                  </Pill>
                 );
               })}
             </div>
-            <details style={{ marginTop: "0.6rem" }}>
-              <summary style={{ cursor: "pointer", color: "#888" }}>
+            <details className="mt-3">
+              <summary className="cursor-pointer text-[13px] text-slate-muted">
                 Or pick a common role
               </summary>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem",
-                            marginTop: "0.4rem" }}>
+              <div className="mt-2 flex flex-wrap gap-2">
                 {CURATED_ROLES.filter(
                   (r) => !suggestions.some((s) => s.label === r),
                 ).map((role) => (
-                  <button
-                    key={role}
-                    type="button"
-                    onClick={() => addCurated(role)}
-                    style={{
-                      padding: "0.3rem 0.6rem", borderRadius: 999,
-                      border: "1px dashed #999", background: "transparent",
-                      color: "inherit", cursor: "pointer", fontSize: "0.9rem",
-                    }}
-                  >
+                  <Pill key={role} dashed onClick={() => addCurated(role)}>
                     + {role}
-                  </button>
+                  </Pill>
                 ))}
               </div>
             </details>
           </div>
         )}
 
-        {error && <p style={{ color: "crimson", margin: 0 }}>{error}</p>}
+        {error && (
+          <p role="alert" className="m-0 text-[13px] text-pin">
+            {error}
+          </p>
+        )}
 
-        <button
+        <Button
+          size="lg"
+          block
           onClick={submit}
           disabled={submitting || selected.length === 0}
-          style={{ padding: "0.7rem", fontSize: "1rem" }}
         >
           {submitting ? "Starting search…" : "Find jobs near here"}
-        </button>
+        </Button>
       </div>
     </APIProvider>
   );

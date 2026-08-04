@@ -1,31 +1,129 @@
-:root {
-  --bg: #ffffff;
-  --fg: #171717;
+@import "tailwindcss";
+
+/*
+ * Find Me A Job AI — design tokens.
+ * Source of truth: design/DESIGN-SPEC.md (extracted from the mockups).
+ *
+ * The design is LIGHT-NATIVE. There is no dark mode in V1 — the paper/cream
+ * direction has no designed dark counterpart, so we opt out explicitly rather
+ * than let the browser invent one. Revisit post-beta.
+ *
+ * Rule: no hardcoded hex outside this file. Use the generated utilities
+ * (bg-paper, text-ink, border-line, …) or var(--color-*) where a utility
+ * doesn't exist.
+ */
+
+@theme {
+  /* ---- Surfaces ---------------------------------------------------- */
+  --color-paper: #f6f5f2; /* app background */
+  --color-paper-deep: #f2f0e9; /* map base / recessed paper */
+  --color-surface: #fffdf7; /* cards, panels */
+  --color-surface-plain: #ffffff; /* login card, floating white sheets */
+
+  /* ---- Lines ------------------------------------------------------- */
+  --color-line: #ddd6c2; /* hairlines, card borders */
+  --color-line-soft: #e6e0cf; /* inner dividers */
+  --color-line-plain: #e2e4e8; /* borders on plain white */
+
+  /* ---- Text -------------------------------------------------------- */
+  /*
+   * Contrast note (see the Phase 6 "Design QA pass" card):
+   *   ink-muted    #8b8574 on surface — ~3.4:1. BELOW WCAG AA for body text.
+   *   slate-faint  #9aa1ab on white   — ~2.8:1. BELOW AA for body text.
+   * Both are fine for large (>=18.66px bold / 24px) or decorative text only —
+   * map street labels, fine print set at >=18px, and so on. For body copy use
+   * `slate-muted` (~5.7:1 on white) or `ink`.
+   */
+  --color-ink: #14213d; /* primary text, logo navy */
+  --color-ink-muted: #8b8574; /* map labels, decorative — not body copy */
+  --color-slate-muted: #6b7280; /* secondary body text on white */
+  --color-slate-faint: #9aa1ab; /* fine print — large sizes only */
+
+  /* ---- Accents ----------------------------------------------------- */
+  --color-accent: #3d6fb5; /* primary actions, links */
+  --color-accent-strong: #2f6fed; /* focus / active */
+  --color-pin: #ff5a45; /* map pin, location marker */
+  --color-success: #2fa572; /* found / complete */
+  --color-success-deep: #4f8c62; /* park labels, quiet success */
+  --color-warn: #ff8a3d; /* in progress */
+  --color-chip-pink: #e64f8a;
+  --color-chip-purple: #8a4bd6;
+
+  /* ---- Map fills --------------------------------------------------- */
+  --color-map-park: #cfe8d1;
+  --color-map-park-soft: #d9eeda;
+  --color-map-park-faint: #dceedd;
+  --color-map-water: #a8d7ee;
+  --color-map-block: #f7edd3;
+  --color-map-road: #fffdf7;
+  --color-map-highway: #b9c6d6;
+  --color-map-highway-edge: #a3b2c6;
+  --color-map-rail: #c4c8d1;
+  --color-map-building: #e6e0cf;
+
+  /* ---- Radii ------------------------------------------------------- */
+  --radius-tag: 2px;
+  --radius-card: 8px;
+  --radius-panel: 12px;
+  --radius-sheet: 20px;
+  --radius-pill: 999px;
+
+  /* ---- Elevation --------------------------------------------------- */
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-sheet: 0 30px 60px rgb(20 30 50 / 0.18);
+
+  /* ---- Type -------------------------------------------------------- */
+  /* --font-sans is wired to next/font in layout.tsx via --font-inter. */
+  --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0a0a0a;
-    --fg: #ededed;
+/* Slow drift on the decorative street map (StreetMapBackdrop). */
+@keyframes mapPan {
+  0% {
+    transform: translate(-3%, -2%) scale(1.18);
+  }
+  50% {
+    transform: translate(2%, 2%) scale(1.18);
+  }
+  100% {
+    transform: translate(-3%, -2%) scale(1.18);
   }
 }
 
+/* Opt out of dark mode: the design has no dark counterpart in V1. */
 html {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
   line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
-  color: #2563eb;
+  color: var(--color-accent-strong);
+}
+
+a:hover {
+  color: var(--color-accent);
 }
 
 button {
   cursor: pointer;
+  font-family: inherit;
+}
+
+/* Slow the decorative map drift for users who ask for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
