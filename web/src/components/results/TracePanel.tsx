@@ -65,7 +65,9 @@ export default function TracePanel({
   stopError: string | null;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const stepCount = search.steps.length;
+  // Same defence as the page: never assume the API sent these.
+  const steps = search.steps ?? [];
+  const stepCount = steps.length;
   const live = search.status === "pending" || search.status === "running";
 
   // Follow the newest row while the search is live. Only when the user is
@@ -79,7 +81,7 @@ export default function TracePanel({
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [stepCount, live]);
 
-  const { done, total } = search.progress;
+  const { done, total } = search.progress ?? { done: 0, total: 0 };
 
   return (
     <div className="flex h-full flex-col">
@@ -146,7 +148,7 @@ export default function TracePanel({
           </p>
         ) : (
           <ul className="m-0 list-none p-0">
-            {search.steps.map((s, i) => (
+            {steps.map((s, i) => (
               <Row key={`${s.at}-${i}`} step={s} />
             ))}
           </ul>

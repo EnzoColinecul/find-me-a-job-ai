@@ -101,7 +101,11 @@ export default function SearchPage({
     search.params.location_label ||
     `${search.params.lat.toFixed(3)}, ${search.params.lng.toFixed(3)}`;
 
-  const { done, total } = search.progress;
+  // Defaulted, not assumed: an API that predates the trace work (or a stale
+  // local uvicorn) returns neither field, and destructuring undefined here would
+  // blank the whole page instead of just hiding the progress line.
+  const { done, total } = search.progress ?? { done: 0, total: 0 };
+  const steps = search.steps ?? [];
   const status: { tone: "working" | "done" | "failed"; text: string } =
     inProgress
       ? {
@@ -129,7 +133,7 @@ export default function SearchPage({
   // While it runs, the trace is the panel. Afterwards the results are, unless
   // the user asks to see the working. Either way, no findings and no steps
   // means no column at all rather than an empty gutter beside the map.
-  const showingTrace = showTrace && (inProgress || search.steps.length > 0);
+  const showingTrace = showTrace && (inProgress || steps.length > 0);
   const panel = showingTrace ? (
     <TracePanel
       search={search}
@@ -162,7 +166,7 @@ export default function SearchPage({
       rightPanel={panel}
       rightPanelSwitch={
         // Only offer the swap when both views have something in them.
-        hasResults && search.steps.length > 0 ? (
+        hasResults && steps.length > 0 ? (
           <button
             type="button"
             onClick={() => setShowTrace((v) => !v)}

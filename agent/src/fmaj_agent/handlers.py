@@ -55,13 +55,22 @@ def _put_step(search_id: str, step: TraceStep) -> None:
     Steps carry a TTL: they are progress, not a record. Keeping them forever
     would also mean holding Places-derived company names indefinitely, which the
     Places terms don't allow.
+
+    **This never raises.** The trace is a view onto the work, not the work — a
+    throttled write or a missing table must not be able to fail a real search.
+    The orchestrator's sink is already wrapped, but `discover_handler` calls this
+    directly, so the guarantee belongs here too.
     """
-    _get_table().put_item(Item={
-        "PK": f"SEARCH#{search_id}",
-        "SK": f"STEP#{step.at}#{step.place_id or 'x'}",
-        **step.to_item(),
-        "expires_at": int(time.time()) + STEP_TTL_SECONDS,
-    })
+    try:
+        _get_table().put_item(Item={
+            "PK": f"SEARCH#{search_id}",
+            "SK": f"STEP#{step.at}#{step.place_id or 'x'}",
+            **step.to_item(),
+            "expires_at": int(time.time()) + STEP_TTL_SECONDS,
+        })
+    except Exception:  # noqa: BLE001
+        logger.warning("could not record trace step %s for %s",
+                       step.tool, search_id, exc_info=True)
 
 
 def discover_handler(event: dict, _context=None) -> dict:
