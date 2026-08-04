@@ -139,6 +139,16 @@ no code change. Never hardcode role/radius limits in the frontend.
 
 ## Known state / gotchas
 
+- **⚠️ The `agent` package is shared by the API and the Lambdas.** Changing anything in
+  it (models, discovery, tools, prompts) means **redeploying `Fmaj-Test/Pipeline`** —
+  restarting the local API is not enough. Symptom of forgetting: every search fails.
+- `pydantic-settings` does NOT export `.env` to `os.environ`; `api/app/settings.py`
+  calls `load_dotenv()` so google.auth / `fmaj_agent.config` can see their vars.
+- Gemini 3 spends part of `max_output_tokens` on thinking — a tight budget returns
+  EMPTY text. Use generous limits + `json_mode` for structured calls.
+- A `failed` search must never render like an empty one (it hides breakage) — the
+  results page has a separate error state.
+
 - Deployed so far: `Fmaj-Test/Data` + `Fmaj-Test/Auth` only. Api/Pipeline Lambdas not
   deployed — local uvicorn + npm dev is the working setup; searches stay `pending`
   (no pipeline yet) and the results page correctly shows incremental progress UI.
