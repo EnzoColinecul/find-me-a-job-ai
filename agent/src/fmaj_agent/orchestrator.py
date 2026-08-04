@@ -25,6 +25,13 @@ from fmaj_agent.tools import (
     search_jobs_adzuna,
     web_search,
 )
+from fmaj_agent.trace import (
+    StepSink,
+    Tag,
+    TraceStep,
+    noop_sink,
+    summarise_tool_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +72,15 @@ class AgentRun:
             "opportunity_type": self.findings.opportunity_type.value,
             "confidence": self.findings.confidence,
         }
+
+
+def _emit(sink: StepSink, step: TraceStep) -> None:
+    """Publish a trace step. A broken sink must never fail the investigation —
+    the panel is a view onto the work, not the work itself."""
+    try:
+        sink(step)
+    except Exception:  # noqa: BLE001
+        logger.warning("trace sink failed for %s", step.tool, exc_info=True)
 
 
 def _model() -> str:
@@ -109,13 +125,24 @@ def _findings_from_report(args: dict) -> Findings:
     )
 
 
-def investigate(company: Company) -> AgentRun:
-    """Run the full investigation for one company. Never raises."""
+def investigate(company: Company, on_step: StepSink = noop_sink) -> AgentRun:
+    """Run the full investigation for one company. Never raises.
+
+    `on_step` is called as each tool completes so the UI can show the run while
+    it is still happening. A sink that throws must never take the search down
+    with it — see `_emit`.
+    """
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
     start = time.monotonic()
+
+    def emit(tag: Tag, tool: str, meta: str = "") -> None:
+        _emit(on_step, TraceStep(tag=tag, tool=tool, text=company.name,
+                                 meta=meta, place_id=company.place_id))
+
     try:
         provider = get_provider()
         if not _triage(company, run):
+            emit(Tag.SKIPPING, "triage", "not a likely employer")
             run.findings = Findings(
                 opportunity_type=OpportunityType.NONE,
                 evidence="triage: not a plausible employer for the role",
@@ -123,6 +150,7 @@ def investigate(company: Company) -> AgentRun:
             )
             run.seconds = time.monotonic() - start
             return run
+        emit(Tag.CHECKING, "triage", "worth a look")
 
         user = (
             f"Investigate this company for job opportunities.\n"
@@ -150,11 +178,20 @@ def investigate(company: Company) -> AgentRun:
                 if tu.name == "report_findings":
                     run.findings = _findings_from_report(tu.input)
                     done = True
+                    emit(
+                        Tag.FOUND
+                        if run.findings.opportunity_type is not OpportunityType.NONE
+                        else Tag.SKIPPING,
+                        "report_findings",
+                        run.findings.opportunity_type.value.replace("_", " "),
+                    )
                     results.append({"id": tu.id, "name": tu.name, "output": {"ok": True}})
                     continue
                 run.tool_calls += 1
                 result = _DISPATCH[tu.name](tu.input) if tu.name in _DISPATCH else None
                 output = result.model_dump() if result else {"ok": False, "reason": "unknown"}
+                tag, meta = summarise_tool_result(tu.name, tu.input, result)
+                emit(tag, tu.name, meta)
                 results.append({"id": tu.id, "name": tu.name, "output": output})
             messages.append({"role": "tool", "results": results})
             if done:
@@ -165,6 +202,7 @@ def investigate(company: Company) -> AgentRun:
     except Exception as exc:  # noqa: BLE001 — one company's failure must not crash the batch
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
+        emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")
         run.findings = Findings(
             opportunity_type=OpportunityType.NONE,
             evidence=f"agent error: {type(exc).__name__}",

@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
-import { getMe, getSearch, type Me, type Search } from "@/lib/api";
+import { getMe, getSearch, stopSearch, type Me, type Search } from "@/lib/api";
 import WorkspaceShell from "@/components/workspace/WorkspaceShell";
 import { MapBar, SearchGlyph, StatusPill } from "@/components/workspace/MapBar";
 import ResultsPanel, { foundResults } from "@/components/results/ResultsPanel";
+import TracePanel from "@/components/results/TracePanel";
 
 const POLL_MS = 3000;
 
@@ -38,6 +39,9 @@ export default function SearchPage({
   const [me, setMe] = useState<Me | null>(null);
   const [search, setSearch] = useState<Search | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showTrace, setShowTrace] = useState(true);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
 
   useEffect(() => {
     getMe()
@@ -56,6 +60,10 @@ export default function SearchPage({
         setSearch(s);
         if (s.status === "pending" || s.status === "running") {
           timer = setTimeout(poll, POLL_MS);
+        } else {
+          // Finished: the trace has served its purpose, so hand the panel over
+          // to the results. The user can switch back to it.
+          setShowTrace(false);
         }
       } catch (e) {
         if (!stopped) setError(e instanceof Error ? e.message : String(e));
@@ -93,25 +101,56 @@ export default function SearchPage({
     search.params.location_label ||
     `${search.params.lat.toFixed(3)}, ${search.params.lng.toFixed(3)}`;
 
+  const { done, total } = search.progress;
   const status: { tone: "working" | "done" | "failed"; text: string } =
     inProgress
       ? {
           tone: "working",
-          text: `Looking at ${search.total} ${search.total === 1 ? "place" : "places"} nearby…`,
+          text: total
+            ? `Looking at ${Math.min(done + 1, total)} of ${total} places nearby…`
+            : "Finding places nearby…",
         }
       : search.status === "failed"
         ? { tone: "failed", text: "This search didn't finish" }
-        : {
-            tone: "done",
-            text:
-              found.length === 0
-                ? "Search complete — nothing worth contacting"
-                : `Search complete — ${found.length} ${found.length === 1 ? "place" : "places"} worth contacting`,
-          };
+        : search.status === "cancelled"
+          ? {
+              tone: "done",
+              text: `Stopped — ${found.length} ${found.length === 1 ? "place" : "places"} found before you stopped`,
+            }
+          : {
+              tone: "done",
+              text:
+                found.length === 0
+                  ? "Search complete — nothing worth contacting"
+                  : `Search complete — ${found.length} ${found.length === 1 ? "place" : "places"} worth contacting`,
+            };
 
-  // No findings yet → no column at all, so the map isn't sitting next to an
-  // empty gutter. The status pill carries the story until something lands.
   const hasResults = found.length > 0;
+  // While it runs, the trace is the panel. Afterwards the results are, unless
+  // the user asks to see the working. Either way, no findings and no steps
+  // means no column at all rather than an empty gutter beside the map.
+  const showingTrace = showTrace && (inProgress || search.steps.length > 0);
+  const panel = showingTrace ? (
+    <TracePanel
+      search={search}
+      stopping={stopping}
+      stopError={stopError}
+      onStop={async () => {
+        setStopping(true);
+        setStopError(null);
+        try {
+          await stopSearch(id);
+          setSearch((s) => (s ? { ...s, status: "cancelled" } : s));
+        } catch (e) {
+          setStopError(e instanceof Error ? e.message : String(e));
+        } finally {
+          setStopping(false);
+        }
+      }}
+    />
+  ) : hasResults ? (
+    <ResultsPanel search={search} />
+  ) : undefined;
 
   return (
     <WorkspaceShell
@@ -119,8 +158,22 @@ export default function SearchPage({
       center={{ lat: search.params.lat, lng: search.params.lng }}
       radiusKm={search.params.radius_km}
       onNewSearch={() => router.push("/")}
-      rightPanelTitle="Results"
-      rightPanel={hasResults ? <ResultsPanel search={search} /> : undefined}
+      rightPanelTitle={showingTrace ? "What I'm doing" : "Results"}
+      rightPanel={panel}
+      rightPanelSwitch={
+        // Only offer the swap when both views have something in them.
+        hasResults && search.steps.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setShowTrace((v) => !v)}
+            className="rounded-pill px-2 py-0.5 text-[11px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+          >
+            {showingTrace
+              ? `Results (${found.length})`
+              : "See what I did"}
+          </button>
+        ) : undefined
+      }
       topBar={
         <MapBar>
           <SearchGlyph />
@@ -151,6 +204,22 @@ export default function SearchPage({
                 found&quot; answer. Please try again — if it keeps happening,
                 the problem is on our side.
               </p>
+            </div>
+          )}
+
+          {/* Stopped is the user's own choice — not an error, not "no results". */}
+          {search.status === "cancelled" && found.length === 0 && (
+            <div className="absolute right-5 bottom-20 left-5 rounded-panel bg-surface-plain px-4 py-3.5 shadow-float lg:left-auto lg:w-[330px]">
+              <strong className="text-[13px] text-ink">
+                You stopped this search
+              </strong>
+              <p className="mt-1 mb-2 text-[11.5px] leading-normal text-slate-muted">
+                Nothing had turned up yet when it stopped. The steps I got
+                through are still on the right.
+              </p>
+              <Link href="/" className="text-[11.5px] font-semibold">
+                Start another search →
+              </Link>
             </div>
           )}
 

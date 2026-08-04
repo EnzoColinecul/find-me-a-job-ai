@@ -10,11 +10,13 @@ logger = logging.getLogger("fmaj")
 
 from app.auth import AuthUser, require_user
 from app.searches import (
+    NotStoppable,
     QuotaExhausted,
     SearchRequest,
     create_search,
     get_search,
     list_searches,
+    stop_search,
 )
 from app.settings import settings
 from app.users import ensure_user
@@ -121,6 +123,20 @@ def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> 
     if found is None:
         raise HTTPException(status_code=404, detail="Search not found")
     return found
+
+
+@app.post("/searches/{search_id}/stop")
+def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+    """Stop a running search. No quota is refunded — the work was done."""
+    try:
+        stopped = stop_search(user.sub, search_id)
+    except NotStoppable as exc:
+        raise HTTPException(
+            status_code=409, detail=f"This search is already {exc}."
+        ) from None
+    if stopped is None:
+        raise HTTPException(status_code=404, detail="Search not found")
+    return stopped
 
 
 # TODO(Phase 4): GET /searches/{search_id}/report — presigned PDF URL.

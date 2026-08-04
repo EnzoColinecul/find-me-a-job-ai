@@ -70,9 +70,22 @@ export interface SearchResult {
   website: string;
 }
 
+/** One row of the live "What I'm doing" panel. */
+export interface TraceStep {
+  tag: "searching" | "checking" | "found" | "skipping";
+  /** Friendly tool name, e.g. "fetch_page". Mapped server-side. */
+  tool: string;
+  text: string;
+  meta: string;
+  at: string;
+}
+
 export interface Search {
   search_id: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  /** How many discovered companies the agent has finished. */
+  progress: { done: number; total: number };
+  steps: TraceStep[];
   /** Roles come back as plain labels here, not RoleSpecs. */
   params: Omit<SearchParams, "roles"> & { roles: string[] };
   results: SearchResult[];
@@ -137,6 +150,15 @@ export async function listSearches(limit = 10): Promise<SearchSummary[]> {
   if (!resp.ok) throw new Error(`listSearches failed: ${resp.status}`);
   const data = await resp.json();
   return data.searches;
+}
+
+/** Halt a running search. 409 if it already finished. */
+export async function stopSearch(searchId: string): Promise<void> {
+  const resp = await authed(`/searches/${searchId}/stop`, { method: "POST" });
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => null);
+    throw new Error(detail?.detail ?? `Couldn't stop this search (${resp.status})`);
+  }
 }
 
 export async function getSearch(searchId: string): Promise<Search> {

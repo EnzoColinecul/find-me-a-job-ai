@@ -179,7 +179,7 @@ def create_search(sub: str, req: SearchRequest) -> dict:
 
     if settings.state_machine_arn:
         try:
-            _get_sfn().start_execution(
+            execution = _get_sfn().start_execution(
                 stateMachineArn=settings.state_machine_arn,
                 name=f"search-{search_id}",
                 input=json.dumps(
@@ -191,6 +191,14 @@ def create_search(sub: str, req: SearchRequest) -> dict:
                         "roles": [r.model_dump() for r in req.roles],
                     }
                 ),
+            )
+            # Stored rather than reconstructed from the state machine ARN: the
+            # execution name is ours today, but deriving an ARN by string
+            # surgery would break silently if that ever changed.
+            _get_table().update_item(
+                Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
+                UpdateExpression="SET execution_arn = :a",
+                ExpressionAttributeValues={":a": execution["executionArn"]},
             )
         except ClientError as exc:
             # Pipeline not deployed / bad ARN: don't fail the request. The search
@@ -224,6 +232,50 @@ def list_searches(sub: str, limit: int = 10) -> list[dict]:
     ]
 
 
+class NotStoppable(Exception):
+    """The search isn't running any more, so there is nothing to stop."""
+
+
+def stop_search(sub: str, search_id: str) -> dict | None:
+    """Halt a running search: stop the execution, then mark it `cancelled`.
+
+    `cancelled` is deliberately its own status, not `failed`. The user chose to
+    stop; showing them an error would be a lie, and whatever results already
+    landed are still real and worth keeping on screen.
+    """
+    resp = _get_table().get_item(
+        Key={"PK": f"SEARCH#{search_id}", "SK": "META"}
+    )
+    meta = resp.get("Item")
+    if meta is None or meta.get("user_sub") != sub:
+        return None
+    if meta.get("status") not in ("pending", "running"):
+        raise NotStoppable(meta.get("status", "unknown"))
+
+    arn = meta.get("execution_arn")
+    if arn:
+        try:
+            _get_sfn().stop_execution(
+                executionArn=arn, cause="Stopped by the user", error="UserStopped"
+            )
+        except ClientError as exc:
+            # Already finished, or the pipeline isn't deployed. The user asked
+            # for it to stop; record that rather than leaving it "running"
+            # forever, but don't claim we halted something we didn't.
+            logger.warning("stop_execution failed for %s: %s", search_id, exc)
+
+    _get_table().update_item(
+        Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
+        UpdateExpression="SET #s = :s, cancelled_at = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": "cancelled",
+            ":t": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return {"search_id": search_id, "status": "cancelled"}
+
+
 def get_search(sub: str, search_id: str) -> dict | None:
     """Return META + results for the owner, or None if not found / not owner."""
     resp = _get_table().query(
@@ -235,9 +287,34 @@ def get_search(sub: str, search_id: str) -> dict | None:
     if meta is None or meta.get("user_sub") != sub:
         return None
     results = [i for i in items if i["SK"].startswith("RESULT#")]
+
+    # Trace rows for the live "What I'm doing" panel. The SK embeds an ISO
+    # timestamp, so sorting by it is chronological.
+    steps = sorted(
+        (i for i in items if i["SK"].startswith("STEP#")),
+        key=lambda i: i["SK"],
+    )
+
+    # Progress: how many of the discovered companies the agent has finished.
+    # company_count is written by discover_handler; until then we don't know the
+    # denominator, so report 0 rather than guessing from partial results.
+    total_companies = int(meta.get("company_count", 0) or 0)
+    done = sum(1 for r in results if r.get("opportunity_type", "pending") != "pending")
+
     return {
         "search_id": search_id,
         "status": meta["status"],
+        "progress": {"done": done, "total": total_companies},
+        "steps": [
+            {
+                "tag": s.get("tag", "checking"),
+                "tool": s.get("tool", ""),
+                "text": s.get("text", ""),
+                "meta": s.get("meta", ""),
+                "at": s.get("at", ""),
+            }
+            for s in steps
+        ],
         "params": {
             "lat": float(meta["lat"]),
             "lng": float(meta["lng"]),

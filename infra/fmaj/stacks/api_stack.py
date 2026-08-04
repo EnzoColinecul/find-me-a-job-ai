@@ -26,6 +26,8 @@ class ApiStack(cdk.Stack):
         #   - PythonFunction bundling ../api with Mangum handler `app.main.handler`
         #   - env: FMAJ_STAGE, FMAJ_TABLE_NAME=data.table.table_name,
         #     FMAJ_REPORTS_BUCKET, FMAJ_COGNITO_*, FMAJ_STATE_MACHINE_ARN
-        #   - grants: table RW, start execution on pipeline state machine
+        #   - grants: table RW, start execution on pipeline state machine, and
+        #     states:StopExecution on its executions (POST /searches/{id}/stop —
+        #     grant_start_execution alone is NOT enough, Stop will 403)
         #   - HTTP API + Cognito JWT authorizer, throttling
         self.config = config

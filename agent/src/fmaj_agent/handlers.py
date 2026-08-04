@@ -8,6 +8,7 @@ Each handler writes to DynamoDB incrementally so the frontend's polling endpoint
 """
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import boto3
@@ -15,12 +16,18 @@ import boto3
 from fmaj_agent.discovery import discover
 from fmaj_agent.models import Company
 from fmaj_agent.orchestrator import investigate
+from fmaj_agent.trace import Tag, TraceStep
 
 logger = logging.getLogger(__name__)
 logging.getLogger().setLevel(logging.INFO)
 
 TABLE_NAME = os.environ.get("FMAJ_TABLE_NAME", "fmaj-test-main")
 AWS_REGION = os.environ.get("FMAJ_AWS_REGION", "ap-southeast-2")
+
+#: Trace rows are live progress, not a record of the search. 7 days is long
+#: enough to debug a run and short enough that we're not sitting on Places data.
+#: Requires TTL enabled on `expires_at` for the table (see infra/data_stack).
+STEP_TTL_SECONDS = 7 * 24 * 3600
 
 _table = None
 
@@ -34,6 +41,26 @@ def _get_table():
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _put_step(search_id: str, step: TraceStep) -> None:
+    """Persist one trace row so the UI can show it while the search is running.
+
+    Sort key is the ISO timestamp, which sorts chronologically as a string; the
+    place_id suffix keeps two companies that emit in the same microsecond from
+    colliding. Companies are investigated in parallel, so a per-run sequence
+    number would not give a meaningful global order.
+
+    Steps carry a TTL: they are progress, not a record. Keeping them forever
+    would also mean holding Places-derived company names indefinitely, which the
+    Places terms don't allow.
+    """
+    _get_table().put_item(Item={
+        "PK": f"SEARCH#{search_id}",
+        "SK": f"STEP#{step.at}#{step.place_id or 'x'}",
+        **step.to_item(),
+        "expires_at": int(time.time()) + STEP_TTL_SECONDS,
+    })
 
 
 def discover_handler(event: dict, _context=None) -> dict:
@@ -73,6 +100,14 @@ def discover_handler(event: dict, _context=None) -> dict:
         ExpressionAttributeValues={":c": len(result.companies),
                                    ":st": {k: str(v) for k, v in result.stats.items()}},
     )
+    n = len(result.companies)
+    # roles arrive as RoleSpec dicts, or plain strings on older searches
+    labels = [r["label"] if isinstance(r, dict) else str(r) for r in event["roles"]]
+    _put_step(search_id, TraceStep(
+        tag=Tag.SEARCHING, tool="discovery",
+        text=", ".join(labels[:2]) or "nearby businesses",
+        meta=f"{n} place{'s' if n != 1 else ''} found",
+    ))
     logger.info("search %s: discovered %d companies %s",
                 search_id, len(result.companies), result.stats)
     return {
@@ -85,7 +120,9 @@ def investigate_handler(event: dict, _context=None) -> dict:
     """Input (one Map item): {search_id, company: {...}}. Writes the RESULT# item."""
     search_id = event["search_id"]
     company = Company(**event["company"])
-    run = investigate(company)  # never raises
+    # Steps are written as they happen, so the panel fills in while the Map
+    # state is still running rather than all at once at the end.
+    run = investigate(company, on_step=lambda s: _put_step(search_id, s))
     f = run.findings
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},

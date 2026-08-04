@@ -28,6 +28,7 @@ export default function WorkspaceShell({
   stackedPanel,
   rightPanel,
   rightPanelTitle,
+  rightPanelSwitch,
   onNewSearch,
 }: {
   me: Me;
@@ -47,6 +48,8 @@ export default function WorkspaceShell({
   /** Results column. When null the column is not rendered at all. */
   rightPanel?: React.ReactNode;
   rightPanelTitle?: string;
+  /** Optional control in the column header, e.g. switching trace ⇄ results. */
+  rightPanelSwitch?: React.ReactNode;
   onNewSearch: () => void;
 }) {
   const [recent, setRecent] = useState<SearchSummary[]>([]);
@@ -153,37 +156,45 @@ export default function WorkspaceShell({
              * next block in the page and hiding it behind a 44px strip would
              * only hide the content the user came for.
              */}
-            <button
-              type="button"
-              onClick={() => setRightOpen((v) => !v)}
-              aria-expanded={rightOpen}
-              className="hidden w-full flex-none items-center gap-2 border-b border-rail-line px-3 py-2.5 text-left hover:bg-rail lg:flex"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-                className={[
-                  "flex-none text-slate-faint transition-transform duration-200",
-                  rightOpen ? "" : "rotate-180",
-                ].join(" ")}
+            <div className="hidden flex-none items-center gap-1 border-b border-rail-line px-2 py-1.5 lg:flex">
+              <button
+                type="button"
+                onClick={() => setRightOpen((v) => !v)}
+                aria-expanded={rightOpen}
+                aria-label={
+                  rightOpen ? "Hide this panel" : "Show this panel"
+                }
+                className="flex flex-none items-center gap-1.5 rounded-card px-1.5 py-1 hover:bg-rail focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
               >
-                <path
-                  d="M9 6l6 6-6 6"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  fill="none"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              {rightOpen && (
-                <span className="truncate text-[11.5px] font-semibold text-slate-muted">
-                  Hide results
-                </span>
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  className={[
+                    "flex-none text-slate-faint transition-transform duration-200",
+                    rightOpen ? "" : "rotate-180",
+                  ].join(" ")}
+                >
+                  <path
+                    d="M9 6l6 6-6 6"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {rightOpen && (
+                  <span className="text-[11px] font-semibold text-slate-muted">
+                    Hide
+                  </span>
+                )}
+              </button>
+              {rightOpen && rightPanelSwitch && (
+                <div className="ml-auto">{rightPanelSwitch}</div>
               )}
-            </button>
+            </div>
 
             <div
               className={[

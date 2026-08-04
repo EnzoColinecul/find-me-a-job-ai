@@ -55,6 +55,7 @@
   --color-success: #2fa572; /* found / complete */
   --color-success-deep: #4f8c62; /* park labels, quiet success */
   --color-warn: #ff8a3d; /* in progress */
+  --color-warn-deep: #a8541a; /* "Checking" tag text — #ff8a3d fails AA at 10px */
   --color-chip-pink: #e64f8a;
   --color-chip-purple: #8a4bd6;
 
