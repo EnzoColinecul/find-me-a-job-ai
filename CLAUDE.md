@@ -65,6 +65,12 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
   budget breach, token/cost accounting per run. Tools never raise (ToolResult).
 - Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn** (links
   only via SerpAPI `site:` queries) — ToS requirement, don't "fix" this.
+- **Trace (`trace.py`) feeds the "nothing hidden" panel, so it must not lie.**
+  `TOOL_LABELS` is the one place internal names become display names, and every
+  label must name a call we really make (the mockup's `places.details` row is
+  labelled `triage` because that's what runs — a test enforces this). Empty tool
+  results are `Checking`, never `Found`. `investigate(on_step=…)` emits steps; a
+  throwing sink is swallowed — the panel must never fail a search.
 
 ## Commands
 
@@ -85,7 +91,7 @@ aws dynamodb update-item --table-name fmaj-test-main \
   --profile fmaj-deploy --region ap-southeast-2
 ```
 
-Tests: api 16, agent 20 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
+Tests: api 24, agent 44 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
 
@@ -184,6 +190,9 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 - `SEARCH#<id> / META`: params, status pending→running→completed|failed, user_sub.
 - `SEARCH#<id> / RESULT#<place_id>`: written incrementally by the pipeline; frontend
   polls `GET /searches/{id}` every 3s and renders grouped by opportunity_type.
+- `SEARCH#<id> / STEP#<iso>#<place_id>`: live agent trace, written as each tool
+  returns. **TTL'd (7d) via `expires_at`** — progress, not a record, and it keeps
+  Places-derived names from living forever. Nothing else sets that attribute.
 - `USER#<sub> / SEARCH#<created_at>#<id>`: owner index for `GET /searches` (the
   workspace rail). Adjacency list, **not a GSI** — no extra provisioned capacity and
   no infra change. Descriptive fields only, deliberately **no status**: status lives
@@ -214,13 +223,14 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   2 discovery ✅ (harness: ~85% relevance, 100% website coverage) · 3 agent core ✅
   (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
   pipeline ✅ deployed, real searches returning real leads · Phase 5: design system ✅
-  login ✅ home ✅ workspace ✅ results-in-right-panel ✅ + link labels ✅ (branch
+  login ✅ home ✅ workspace ✅ results-in-right-panel ✅ + link labels ✅ ·
+  live agent trace 🚧 code-complete, **blocked on `cdk deploy 'Fmaj-Test/Data'`
+  (new TTL attr) + `'Fmaj-Test/Pipeline'` (agent changed)** (branch
   `feat/design-system-and-login`, **not yet browser-verified**). Deferred: numbered
   map pins (own card — needs lat/lng persisted → Pipeline redeploy + a Places ToS
   call) and Refine prefilling the previous params.
-  **Next: Phase 5 remainder — live agent trace panel (the last P0; needs backend
-  work: persist steps mid-flight + Stop → stopExecution) and mobile layouts. Then
-  Phase 4 (PDF report) and Phase 6 (hardening + private beta).**
+  **Next: mobile layouts (last Phase 5 card), then Phase 4 (PDF report) and
+  Phase 6 (hardening + private beta).**
 
 ## Known state / gotchas
 
