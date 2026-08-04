@@ -126,7 +126,8 @@ The trace panel's tools map 1:1 onto real ones (`places.nearby`→discovery,
 not persisted mid-flight yet** (only the final `RESULT#`), and recent-searches /
 user-profile data don't exist. Those are the real backend gaps behind the redesign.
 
-Notion cards for all of this live in Phase 4 (+ a QA pass in Phase 5).
+Notion cards live in their own **Phase 5 — UI redesign** (design system → login → home
+→ workspace → trace → results → mobile); hardening/beta is now **Phase 6**.
 
 ## Data model (DynamoDB single table `fmaj-{stage}-main`, PK/SK)
 
@@ -159,9 +160,10 @@ Notion cards for all of this live in Phase 4 (+ a QA pass in Phase 5).
   exception handler for this; check uvicorn logs.
 - Phases from PLAN.md: 0 foundations ✅ · 1 search UX ✅ (browser-verified) ·
   2 discovery ✅ (harness: ~85% relevance, 100% website coverage) · 3 agent core ✅
-  (Gemini run verified) — **next: eval set (20 golden companies, precision gate),
-  then Step Functions pipeline (Discover → Map conc. 5-10 → Aggregate), then
-  Phase 4 results/PDF, Phase 5 hardening/beta.**
+  (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
+  pipeline ✅ deployed, real searches returning real leads. **Next: Phase 4 (PDF
+  report), Phase 5 (UI redesign — start with the design-system card), Phase 6
+  (hardening + private beta).**
 
 ## Known state / gotchas
 
