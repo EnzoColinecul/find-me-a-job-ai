@@ -45,7 +45,7 @@ scripts/ store-external-secrets.sh (Secrets Manager registration)
   `adzuna` (JSON app_id/app_key), `web-search-key` (SerpAPI). SSM param:
   `/fmaj/{stage}/google-client-id`. Register via `scripts/store-external-secrets.sh`.
 - **Two Google Maps keys, never mix:** a browser key (HTTP-referrer restricted, Maps
-  JS + legacy-free autocomplete via `PlaceAutocompleteElement`) in `web/.env.local`
+  JS + Places Autocomplete Data API — see below) in `web/.env.local`
   as `NEXT_PUBLIC_GOOGLE_MAPS_KEY`; a server key (no app restriction, Places API
   (New) only) in Secrets Manager. A referrer-restricted key from a server returns
   403 `API_KEY_HTTP_REFERRER_BLOCKED`.
@@ -128,10 +128,10 @@ Full mobile set included.
 
 The trace panel's tools map 1:1 onto real ones (`places.nearby`→discovery,
 `fetch_page`→`fetch_url`, `extract_jobs`→careers/Adzuna, `web_search`→SerpAPI,
-`extract_contact`→`extract_emails`), so the backend can emit them — but **steps are
-not persisted mid-flight yet** (only the final `RESULT#`). That is now the *one*
-remaining backend gap behind the redesign: recent searches shipped as `GET /searches`,
-and the profile block was scoped to name/email so it needs no new fields.
+`extract_contact`→`extract_emails`). Steps **are** now persisted mid-flight as
+`STEP#` items, `GET /searches/{id}` returns `steps` + `progress`, and
+`POST /searches/{id}/stop` cancels the execution — so no backend gaps remain
+behind the redesign, only the deploys listed under Phases.
 
 Notion cards live in their own **Phase 5 — UI redesign** (design system → login → home
 → workspace → trace → results → mobile); hardening/beta is now **Phase 6**.
