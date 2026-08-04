@@ -135,3 +135,43 @@ def test_poc_defaults_stay_inside_the_serpapi_free_tier() -> None:
     ceiling = fresh.MAX_COMPANIES * fresh.MAX_WEB_SEARCHES
     assert ceiling <= 10, f"defaults allow {ceiling} SerpAPI calls per search"
     assert 250 // ceiling >= 25
+
+
+# ---- key-confusion diagnostics ---------------------------------------------
+
+
+def test_referrer_blocked_403_explains_the_two_key_rule() -> None:
+    """This exact 403 cost a debugging session: the raw Google body buries the
+    reason under 500 characters of JSON. The message must name the fix."""
+    import httpx
+
+    from fmaj_agent.places import PlacesError, _check
+
+    body = (
+        '{"error":{"code":403,"message":"Requests from referer <empty> are '
+        'blocked.","status":"PERMISSION_DENIED","details":[{"reason":'
+        '"API_KEY_HTTP_REFERRER_BLOCKED"}]}}'
+    )
+    resp = httpx.Response(
+        403, text=body, request=httpx.Request("POST", "https://places.googleapis.com/v1/x")
+    )
+    with pytest.raises(PlacesError) as exc:
+        _check(resp)
+
+    message = str(exc.value)
+    assert "SERVER key" in message
+    assert "store-external-secrets" in message
+
+
+def test_other_places_errors_still_show_the_raw_body() -> None:
+    """Don't swallow unfamiliar failures behind a friendly guess."""
+    import httpx
+
+    from fmaj_agent.places import PlacesError, _check
+
+    resp = httpx.Response(
+        500, text="upstream exploded",
+        request=httpx.Request("POST", "https://places.googleapis.com/v1/x"),
+    )
+    with pytest.raises(PlacesError, match="upstream exploded"):
+        _check(resp)

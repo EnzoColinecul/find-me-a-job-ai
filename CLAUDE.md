@@ -48,7 +48,11 @@ scripts/ store-external-secrets.sh (Secrets Manager registration)
   JS + Places Autocomplete Data API — see below) in `web/.env.local`
   as `NEXT_PUBLIC_GOOGLE_MAPS_KEY`; a server key (no app restriction, Places API
   (New) only) in Secrets Manager. A referrer-restricted key from a server returns
-  403 `API_KEY_HTTP_REFERRER_BLOCKED`.
+  403 `API_KEY_HTTP_REFERRER_BLOCKED` — **this has already happened once**
+  (2026-08-04, pasted the browser key while rotating the SerpAPI key). `places.py`
+  now translates that 403 into a message naming the fix, and
+  `store-external-secrets.sh` **keeps a secret unchanged if you leave the prompt
+  blank**, so rotating one key can't clobber another.
 - `fmaj_agent.secrets` resolves keys env-var-first (`FMAJ_PLACES_KEY`,
   `FMAJ_ADZUNA_APP_ID/KEY`, `FMAJ_SERPAPI_KEY`), Secrets Manager second.
 
@@ -92,7 +96,7 @@ aws dynamodb update-item --table-name fmaj-test-main \
   --profile fmaj-deploy --region ap-southeast-2
 ```
 
-Tests: api 24, agent 54 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
+Tests: api 24, agent 56 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
 
