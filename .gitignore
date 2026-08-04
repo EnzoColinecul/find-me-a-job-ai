@@ -58,3 +58,6 @@ agent/discovery_results.csv
 
 # eval outputs
 agent/evals/results-*.json
+
+# design bundles (large; keep the extracted spec + markup)
+design/Find Me A Job AI - Mockups.html

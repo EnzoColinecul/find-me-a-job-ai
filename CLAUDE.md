@@ -102,6 +102,32 @@ role if the LLM output is unusable.
 it and the frontend *fetches* it from `GET /config` — raising it for subscriptions needs
 no code change. Never hardcode role/radius limits in the frontend.
 
+## Design (mockups landed 2026-08-04)
+
+Source of truth: **`design/DESIGN-SPEC.md`** (tokens, per-screen specs, gaps) with
+`design/mockups-extracted.html` (decoded markup — open for exact values) and the
+original bundle `design/Find Me A Job AI - Mockups.html`. Logo: `design/Logo-Idea.png`
+(2.1 MB — must be optimised into `web/public/` before use).
+
+Direction: warm **paper-like editorial** UI — cream `#f6f5f2`, surface `#fffdf7`,
+navy ink `#14213d`, accent `#3d6fb5`, pin `#ff5a45`, Inter. A stylised street map is
+the hero; the agent's work is shown openly. **This reverses the current dark-by-default
+styling** — the design is light-native.
+
+Five screens: login (map hero + "Continue with Google") · conversational home
+("Hello Alex — what role do you want next?") · **three-pane workspace** (recent
+searches + profile | map | roles/radius/start) · results ("3 places worth contacting",
+source-labelled links) · **live agent trace** ("What I'm doing — nothing hidden").
+Full mobile set included.
+
+The trace panel's tools map 1:1 onto real ones (`places.nearby`→discovery,
+`fetch_page`→`fetch_url`, `extract_jobs`→careers/Adzuna, `web_search`→SerpAPI,
+`extract_contact`→`extract_emails`), so the backend can emit them — but **steps are
+not persisted mid-flight yet** (only the final `RESULT#`), and recent-searches /
+user-profile data don't exist. Those are the real backend gaps behind the redesign.
+
+Notion cards for all of this live in Phase 4 (+ a QA pass in Phase 5).
+
 ## Data model (DynamoDB single table `fmaj-{stage}-main`, PK/SK)
 
 - `USER#<cognito-sub> / PROFILE`: email, name, `free_search_used` (quota = atomic
