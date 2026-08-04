@@ -35,9 +35,12 @@ from fmaj_agent.trace import (
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 8
-MAX_SECONDS = 60
 _SYSTEM = (Path(__file__).parent / "prompts" / "system.md").read_text()
+
+#: Tools with their own per-company budget on top of the shared tool-call limit.
+#: SerpAPI's free tier is ~250 searches a MONTH, so `web_search` is metered
+#: separately — see the arithmetic in config.py.
+_METERED = {"web_search": lambda: config.MAX_WEB_SEARCHES}
 
 _DISPATCH = {
     "fetch_url": lambda a: fetch_url(a["url"]),
@@ -56,6 +59,8 @@ class AgentRun:
     output_tokens: int = 0
     seconds: float = 0.0
     trace: list[str] = field(default_factory=list)
+    #: Calls per metered tool, so a run's paid-API spend is visible afterwards.
+    metered_calls: dict[str, int] = field(default_factory=dict)
     # Set when the run aborted due to an infrastructure failure (network/model),
     # NOT because the agent legitimately found nothing. Callers must not treat
     # these as real findings.
@@ -66,12 +71,29 @@ class AgentRun:
             "provider": config.LLM_PROVIDER,
             "error": self.error or "",
             "tool_calls": self.tool_calls,
+            "web_searches": self.metered_calls.get("web_search", 0),
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "seconds": round(self.seconds, 1),
             "opportunity_type": self.findings.opportunity_type.value,
             "confidence": self.findings.confidence,
         }
+
+
+def _over_budget(run: AgentRun, tool: str) -> str | None:
+    """Reserve one call of a metered tool. Returns a refusal reason, or None.
+
+    Counts the call only when it is allowed, so `metered_calls` records real
+    paid-API usage rather than attempts.
+    """
+    if tool not in _METERED:
+        return None
+    cap = _METERED[tool]()
+    used = run.metered_calls.get(tool, 0)
+    if cap and used >= cap:  # cap == 0 means unlimited
+        return f"budget reached: {cap} {tool} call(s) per company"
+    run.metered_calls[tool] = used + 1
+    return None
 
 
 def _emit(sink: StepSink, step: TraceStep) -> None:
@@ -161,7 +183,13 @@ def investigate(company: Company, on_step: StepSink = noop_sink) -> AgentRun:
         )
         messages: list[dict] = [{"role": "user", "text": user}]
 
-        while run.tool_calls < MAX_TOOL_CALLS and (time.monotonic() - start) < MAX_SECONDS:
+        # Read off `config` at call time rather than copied into module constants,
+        # so overriding the budget is a one-line change in one place (and tests
+        # can patch it). 0 = unlimited — see config.py for the arithmetic.
+        max_calls = config.MAX_TOOL_CALLS or float("inf")
+        max_seconds = config.MAX_SECONDS or float("inf")
+
+        while run.tool_calls < max_calls and (time.monotonic() - start) < max_seconds:
             turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024)
             run.input_tokens += turn.input_tokens
             run.output_tokens += turn.output_tokens
@@ -188,6 +216,17 @@ def investigate(company: Company, on_step: StepSink = noop_sink) -> AgentRun:
                     results.append({"id": tu.id, "name": tu.name, "output": {"ok": True}})
                     continue
                 run.tool_calls += 1
+
+                denial = _over_budget(run, tu.name)
+                if denial is not None:
+                    # Refuse rather than silently dropping the call: the model is
+                    # told why, so it can fall back to a cheaper source, and the
+                    # trace shows the refusal instead of a phantom step.
+                    emit(Tag.SKIPPING, tu.name, denial)
+                    results.append({"id": tu.id, "name": tu.name,
+                                    "output": {"ok": False, "reason": denial}})
+                    continue
+
                 result = _DISPATCH[tu.name](tu.input) if tu.name in _DISPATCH else None
                 output = result.model_dump() if result else {"ok": False, "reason": "unknown"}
                 tag, meta = summarise_tool_result(tu.name, tu.input, result)

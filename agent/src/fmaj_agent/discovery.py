@@ -10,13 +10,16 @@ import logging
 import math
 from dataclasses import dataclass, field
 
-from fmaj_agent import mapping
+from fmaj_agent import config, mapping
 from fmaj_agent.models import Company, RoleSpec
 from fmaj_agent.places import PlacesClient
 
 logger = logging.getLogger(__name__)
 
-MAX_COMPANIES = 40
+#: Ceiling regardless of configuration: Place Details is the Enterprise SKU
+#: (1K/month) and one search must never be able to eat the monthly quota.
+#: `FMAJ_MAX_COMPANIES=0` means "no PoC limit", not "no limit at all".
+HARD_MAX_COMPANIES = 40
 
 
 @dataclass
@@ -65,9 +68,14 @@ def discover(
     radius_km: float,
     roles: list,
     client: PlacesClient | None = None,
-    max_companies: int = MAX_COMPANIES,
+    max_companies: int | None = None,
     fetch_details: bool = True,
 ) -> DiscoveryResult:
+    # None -> use the configured budget; 0 there means "unlimited", which still
+    # means HARD_MAX_COMPANIES because Place Details costs real money per call.
+    if max_companies is None:
+        max_companies = config.MAX_COMPANIES or HARD_MAX_COMPANIES
+    max_companies = min(max_companies, HARD_MAX_COMPANIES)
     client = client or PlacesClient()
     radius_m = radius_km * 1000
     candidates: dict[str, dict] = {}

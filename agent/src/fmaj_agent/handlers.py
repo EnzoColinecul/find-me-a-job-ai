@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import boto3
 
+from fmaj_agent import config
 from fmaj_agent.discovery import discover
 from fmaj_agent.models import Company
 from fmaj_agent.orchestrator import investigate
@@ -100,6 +101,7 @@ def discover_handler(event: dict, _context=None) -> dict:
         ExpressionAttributeValues={":c": len(result.companies),
                                    ":st": {k: str(v) for k, v in result.stats.items()}},
     )
+    logger.info("search %s budgets: %s", search_id, config.budget_summary())
     n = len(result.companies)
     # roles arrive as RoleSpec dicts, or plain strings on older searches
     labels = [r["label"] if isinstance(r, dict) else str(r) for r in event["roles"]]
@@ -139,9 +141,10 @@ def investigate_handler(event: dict, _context=None) -> dict:
             ":t": _now(),
         },
     )
-    logger.info("search %s / %s -> %s (tools=%d tokens=%d/%d)",
+    logger.info("search %s / %s -> %s (tools=%d web_search=%d tokens=%d/%d)",
                 search_id, company.name, f.opportunity_type.value,
-                run.tool_calls, run.input_tokens, run.output_tokens)
+                run.tool_calls, run.metered_calls.get("web_search", 0),
+                run.input_tokens, run.output_tokens)
     return {"place_id": company.place_id, "opportunity_type": f.opportunity_type.value}
 
 

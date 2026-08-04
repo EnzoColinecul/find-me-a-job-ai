@@ -61,8 +61,9 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
 - Bedrock (Claude Haiku/Sonnet 4.5 via `au.` inference profiles) is blocked until
   the Anthropic use-case form is approved in the Bedrock console; then it's a drop-in.
 - Orchestrator (`orchestrator.py`): triage → tool loop → `report_findings` (strict
-  JSON), hard budgets in code (8 tool calls / 60s), forced structured report on
-  budget breach, token/cost accounting per run. Tools never raise (ToolResult).
+  JSON), hard budgets in code (see "Cost discipline" — read off `config` at call
+  time, not copied into module constants), forced structured report on budget
+  breach, token/cost accounting per run. Tools never raise (ToolResult).
 - Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn** (links
   only via SerpAPI `site:` queries) — ToS requirement, don't "fix" this.
 - **Trace (`trace.py`) feeds the "nothing hidden" panel, so it must not lie.**
@@ -91,7 +92,7 @@ aws dynamodb update-item --table-name fmaj-test-main \
   --profile fmaj-deploy --region ap-southeast-2
 ```
 
-Tests: api 24, agent 44 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
+Tests: api 24, agent 54 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
 
@@ -206,6 +207,17 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   `rankPreference: DISTANCE` on Nearby (user wants local results).
 - Places ToS: don't persist place data beyond the search (place_id is exempt).
 - Budgets/caps exist in code, not prompts. Keep per-search cost logged.
+- **Per-search budgets live in `fmaj_agent/config.py`, env-driven, `0 = unlimited`**
+  (`FMAJ_MAX_COMPANIES` 5, `FMAJ_MAX_WEB_SEARCHES` 2 per company,
+  `FMAJ_MAX_TOOL_CALLS` 8, `FMAJ_MAX_SECONDS` 60). Companies run in **parallel**
+  Lambdas so there's no shared live counter — the ceiling is arithmetic:
+  `MAX_COMPANIES × MAX_WEB_SEARCHES` = worst-case SerpAPI calls per search
+  (PoC: 5×2=10 → ~25 searches/month against SerpAPI's ~250). `web_search` is the
+  only metered tool; over budget it returns `ok=False` with a reason, which the
+  model can react to and the trace shows as `Skipping` — never a silent drop.
+  `FMAJ_MAX_COMPANIES=0` still caps at `discovery.HARD_MAX_COMPANIES` (40) because
+  Place Details is the Enterprise SKU. The prompt orders tools by cost (own site →
+  Adzuna → `web_search` last); that's guidance, the cap is the guarantee.
 
 ## Workflow conventions
 
