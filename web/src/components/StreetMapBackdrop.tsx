@@ -2,8 +2,13 @@
  * The stylised street map that sits behind the login and home screens.
  *
  * Purely decorative — it is not the real Google map, and it is hidden from
- * assistive tech. Ported from `design/mockups-extracted.html` (screen 1) with
- * every colour pulled from the token layer rather than hardcoded.
+ * assistive tech. Ported from `design/mockups-extracted.html` with every colour
+ * pulled from the token layer rather than hardcoded.
+ *
+ * Each mockup screen tunes it differently, so the knobs are props rather than
+ * baked in: login is rotated -7deg and blurred behind its card, home is -4deg
+ * with a stronger wash (the greeting sits directly on the map, so the map has
+ * to recede further).
  *
  * It drifts slowly via the `mapPan` keyframes; `prefers-reduced-motion` in
  * globals.css freezes it.
@@ -47,14 +52,46 @@ const BUILDINGS = [
 const ROAD_EDGE = "0 -1.5px 0 var(--color-line), 0 1.5px 0 var(--color-line)";
 const ROAD_EDGE_V = "-1.5px 0 0 var(--color-line), 1.5px 0 0 var(--color-line)";
 
-export default function StreetMapBackdrop() {
+export type BackdropProps = {
+  /** Rotation of the street grid, in degrees. Login -7, home -4. */
+  rotate?: number;
+  /** How far the drifting layer bleeds past the frame, in px. */
+  spread?: number;
+  /** Drift cycle, in seconds. */
+  duration?: number;
+  /** Blur radius in px; 0 for a crisp map. */
+  blur?: number;
+  /**
+   * `light` — the login's gentle wash, for a map behind a solid card.
+   * `strong` — the home's three-stop wash, for text sitting on the map itself.
+   */
+  wash?: "light" | "strong";
+};
+
+export default function StreetMapBackdrop({
+  rotate = -7,
+  spread = 80,
+  duration = 24,
+  blur = 2,
+  wash = "light",
+}: BackdropProps) {
   return (
     <div
       aria-hidden="true"
       className="pointer-events-none absolute inset-0 overflow-hidden bg-paper-deep select-none"
     >
-      <div className="absolute -inset-20 animate-[mapPan_24s_ease-in-out_infinite] overflow-hidden blur-[2px]">
-        <div className="absolute -inset-[22%] origin-center -rotate-[7deg] overflow-hidden">
+      <div
+        className="absolute overflow-hidden"
+        style={{
+          inset: `-${spread}px`,
+          animation: `mapPan ${duration}s ease-in-out infinite`,
+          filter: blur ? `blur(${blur}px)` : undefined,
+        }}
+      >
+        <div
+          className="absolute -inset-[22%] origin-center overflow-hidden"
+          style={{ transform: `rotate(${rotate}deg)` }}
+        >
           {/* Land masses */}
           <div className="absolute inset-0 bg-paper-deep" />
           <div className="absolute -left-[12%] -top-[12%] h-1/2 w-2/3 bg-map-block" />
@@ -208,8 +245,16 @@ export default function StreetMapBackdrop() {
         </div>
       </div>
 
-      {/* Wash that lifts the foreground card off the map */}
-      <div className="absolute inset-0 bg-gradient-to-b from-white/12 to-white/45" />
+      {/* Wash that lifts the foreground off the map */}
+      <div
+        className="absolute inset-0"
+        style={{
+          background:
+            wash === "strong"
+              ? "linear-gradient(180deg, rgb(255 255 255 / 0.08) 0%, rgb(255 255 255 / 0.34) 55%, rgb(255 255 255 / 0.62) 100%)"
+              : "linear-gradient(180deg, rgb(255 255 255 / 0.12), rgb(255 255 255 / 0.42))",
+        }}
+      />
     </div>
   );
 }

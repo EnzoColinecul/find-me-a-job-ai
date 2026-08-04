@@ -20,10 +20,17 @@
   --color-surface: #fffdf7; /* cards, panels */
   --color-surface-plain: #ffffff; /* login card, floating white sheets */
 
+  /* ---- Workspace rail (mockups 3 & 4) ------------------------------ */
+  --color-rail: #fafaf8; /* left rail background */
+  --color-rail-line: #ecebe6; /* rail border + dividers */
+  --color-rail-active: #eceae4; /* selected recent-search row */
+  --color-rail-muted: #a9a69c; /* rail section labels, meta */
+
   /* ---- Lines ------------------------------------------------------- */
   --color-line: #ddd6c2; /* hairlines, card borders */
   --color-line-soft: #e6e0cf; /* inner dividers */
   --color-line-plain: #e2e4e8; /* borders on plain white */
+  --color-line-cool: #e6e8eb; /* borders on floating white panels */
 
   /* ---- Text -------------------------------------------------------- */
   /*
@@ -36,8 +43,10 @@
    */
   --color-ink: #14213d; /* primary text, logo navy */
   --color-ink-muted: #8b8574; /* map labels, decorative — not body copy */
+  --color-ink-soft: #5b5f68; /* rail rows, quieter body text */
   --color-slate-muted: #6b7280; /* secondary body text on white */
   --color-slate-faint: #9aa1ab; /* fine print — large sizes only */
+  --color-slate-strong: #4b5563; /* quick-pick pills over the map */
 
   /* ---- Accents ----------------------------------------------------- */
   --color-accent: #3d6fb5; /* primary actions, links */
@@ -65,16 +74,27 @@
   --radius-tag: 2px;
   --radius-card: 8px;
   --radius-panel: 12px;
+  --radius-float: 16px; /* panels floating over the map */
   --radius-sheet: 20px;
   --radius-pill: 999px;
 
   /* ---- Elevation --------------------------------------------------- */
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
-  --shadow-sheet: 0 30px 60px rgb(20 30 50 / 0.18);
+  --shadow-bar: 0 6px 20px rgb(20 30 50 / 0.1); /* floating search bar */
+  --shadow-input: 0 10px 34px rgb(20 30 50 / 0.12); /* home's pill input */
+  --shadow-float: 0 18px 44px rgb(20 30 50 / 0.16); /* the workspace panel */
+  --shadow-sheet: 0 30px 60px rgb(20 30 50 / 0.18); /* the login card */
+  --shadow-pin: 0 10px 20px rgb(255 90 69 / 0.28); /* the Start analysis CTA */
 
   /* ---- Type -------------------------------------------------------- */
   /* --font-sans is wired to next/font in layout.tsx via --font-inter. */
   --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Slow drift on the decorative street map (StreetMapBackdrop). */

@@ -101,7 +101,7 @@ export default function Home() {
   if (!suggestions) {
     return (
       <HomeScreen
-        firstName={me.name ? me.name.split(" ")[0] : null}
+        me={me}
         busy={interpreting}
         error={error}
         onSubmit={interpret}
