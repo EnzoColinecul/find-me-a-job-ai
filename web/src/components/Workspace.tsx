@@ -1,17 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   createSearch,
   type AppConfig,
   type Me,
   type RoleSuggestion,
 } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AddressInput, type LatLng } from "./map/MapPieces";
-import WorkspaceShell from "./workspace/WorkspaceShell";
-import { MapBar, SearchGlyph } from "./workspace/MapBar";
+import { MapBar } from "./workspace/MapBar";
 import StartPanel from "./workspace/StartPanel";
+import WorkspaceShell from "./workspace/WorkspaceShell";
 
 const SYDNEY = { lat: -33.8688, lng: 151.2093 };
 
@@ -110,10 +110,7 @@ export default function Workspace({
       onNewSearch={onStartOver}
       topBar={
         <MapBar>
-          <SearchGlyph />
-          <div className="min-w-0 flex-1">
-            <AddressInput onPlace={onPlace} />
-          </div>
+          <AddressInput onPlace={onPlace} bias={center} />
           <span className="hidden flex-none text-[11.5px] text-slate-faint sm:block">
             Drag the pin to move the centre
           </span>

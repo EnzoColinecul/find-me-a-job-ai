@@ -92,53 +92,17 @@
 }
 
 /*
- * Google's Places autocomplete is a web component with its own shadow DOM and
- * its own look — Roboto, a white pill, a Google-blue focus ring. Dropped into
- * our address bar it read as a foreign control. It exposes CSS parts, so we
- * restyle it to inherit the app's font and tokens instead.
+ * NOTE: there is deliberately no CSS here for `gmp-place-autocomplete`.
  *
- * If a future Maps release renames these parts the widget falls back to its own
- * styling — ugly, but still functional. Nothing here is load-bearing.
+ * That widget renders into a CLOSED shadow root, so nothing from this file can
+ * reach inside it — not `::part()`, not custom properties. An earlier attempt to
+ * restyle it that way did nothing at all, which is why the field kept Google's
+ * white pill and blue Material focus ring.
+ *
+ * The address field is now our own input driven by the Places Autocomplete Data
+ * API — see `web/src/components/map/AddressInput.tsx`. Don't reintroduce the
+ * widget expecting to style it.
  */
-gmp-place-autocomplete {
-  --gmp-mat-color-surface: transparent;
-  --gmp-mat-color-on-surface: var(--color-ink);
-  --gmp-mat-color-on-surface-variant: var(--color-slate-faint);
-  --gmp-mat-color-primary: var(--color-accent-strong);
-  --gmp-mat-font-family: var(--font-inter), system-ui, sans-serif;
-  width: 100%;
-  background: transparent;
-}
-
-gmp-place-autocomplete::part(input) {
-  width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  font-family: var(--font-inter), system-ui, sans-serif;
-  font-size: 13.5px;
-  font-weight: 500;
-  color: var(--color-ink);
-}
-
-gmp-place-autocomplete::part(input):focus {
-  outline: none;
-}
-
-gmp-place-autocomplete::part(input)::placeholder {
-  color: var(--color-slate-faint);
-  font-weight: 400;
-}
-
-/* The suggestion dropdown, so it matches the floating panels. */
-gmp-place-autocomplete::part(prediction-list) {
-  border: 1px solid var(--color-line-cool);
-  border-radius: var(--radius-panel);
-  box-shadow: var(--shadow-float);
-  font-family: var(--font-inter), system-ui, sans-serif;
-}
 
 @keyframes spin {
   to {

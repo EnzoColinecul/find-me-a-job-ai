@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
 import type { Me } from "@/lib/api";
 import { logout } from "@/lib/auth";
-import StreetMapBackdrop from "./StreetMapBackdrop";
+import { useState } from "react";
 import AppMark from "./AppMark";
 import Avatar from "./Avatar";
+import StreetMapBackdrop from "./StreetMapBackdrop";
 
 /**
  * Mockup 2 — the first screen after signing in. One question, one input.
@@ -27,7 +27,13 @@ const QUICK_PICKS = [
 
 function SearchIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" className="flex-none">
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className="flex-none"
+    >
       <circle
         cx="11"
         cy="11"
@@ -122,7 +128,12 @@ export default function HomeScreen({
               {busy ? (
                 <span className="block h-4 w-4 animate-[spin_0.8s_linear_infinite] rounded-full border-2 border-white/40 border-t-white" />
               ) : (
-                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
                   <path
                     d="M12 19V5M5 12l7-7 7 7"
                     stroke="currentColor"
