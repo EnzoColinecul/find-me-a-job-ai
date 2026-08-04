@@ -154,6 +154,20 @@ when `SearchForm.tsx` was deleted).
 Screen flow lives in `web/src/app/page.tsx`: signed out → `LoginScreen`, signed in
 with no interpreted roles → `HomeScreen`, roles interpreted → `Workspace`.
 
+**`WorkspaceShell` is the shell for both `/` and `/search/{id}`** (rail | map |
+optional right column). Mockup 4 is mockup 3 with a third pane — results are *not*
+a separate page, the map stays on screen. The right column renders only when there
+are findings; in-flight/empty/failed searches show the status pill over the map
+instead of an empty gutter.
+
+**Google Maps chrome is off** (`disableDefaultUI` + explicit `cameraControl`,
+`streetViewControl`, `zoomControl`, … `false`). Two things not to "fix":
+`keyboardShortcuts` stays **true** — with the buttons gone it's the only non-mouse
+way to pan/zoom; and the **Google wordmark + "Terms"/"Report a map error" links are
+required by the Maps ToS** to stay visible and unobscured, so they cannot be
+removed. The Places autocomplete is a web component with its own Roboto/white
+styling — `globals.css` restyles it via `gmp-place-autocomplete` + `::part(input)`.
+
 `web/src/lib/links.ts` classifies result links by URL pattern into badge types.
 **Keep it conservative** — an unrecognised path gets a generic badge, never an
 overclaimed "Live listing". The badge is only useful if it's trustworthy without
@@ -200,8 +214,10 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   2 discovery ✅ (harness: ~85% relevance, 100% website coverage) · 3 agent core ✅
   (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
   pipeline ✅ deployed, real searches returning real leads · Phase 5: design system ✅
-  login ✅ home ✅ workspace ✅ results restyle + link labels ✅ (branch
-  `feat/design-system-and-login`, **not yet browser-verified**).
+  login ✅ home ✅ workspace ✅ results-in-right-panel ✅ + link labels ✅ (branch
+  `feat/design-system-and-login`, **not yet browser-verified**). Deferred: numbered
+  map pins (own card — needs lat/lng persisted → Pipeline redeploy + a Places ToS
+  call) and Refine prefilling the previous params.
   **Next: Phase 5 remainder — live agent trace panel (the last P0; needs backend
   work: persist steps mid-flight + Stop → stopExecution) and mobile layouts. Then
   Phase 4 (PDF report) and Phase 6 (hardening + private beta).**
