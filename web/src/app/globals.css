@@ -111,6 +111,48 @@
   }
 }
 
+/*
+ * Live agent trace. New steps arrive at the TOP of the list, so they drop in
+ * from slightly above and the ones below slide down to make room — the motion
+ * says "this just happened" rather than "something changed somewhere".
+ * prefers-reduced-motion (below) collapses all of this to nothing.
+ */
+@keyframes traceIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* The dot on the newest row, while work is still happening. */
+@keyframes tracePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--color-accent-strong);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgb(47 111 237 / 0);
+    opacity: 0.85;
+  }
+}
+
+/* Expanding ring over the map centre while a search runs. */
+@keyframes mapPing {
+  from {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+  to {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
 /* Slow drift on the decorative street map (StreetMapBackdrop). */
 @keyframes mapPan {
   0% {

@@ -8,6 +8,9 @@ import WorkspaceShell from "@/components/workspace/WorkspaceShell";
 import { MapBar, SearchGlyph, StatusPill } from "@/components/workspace/MapBar";
 import ResultsPanel, { foundResults } from "@/components/results/ResultsPanel";
 import TracePanel from "@/components/results/TracePanel";
+import LiveStatusCard, {
+  MapActivityPing,
+} from "@/components/results/LiveStatusCard";
 
 const POLL_MS = 3000;
 
@@ -102,56 +105,48 @@ export default function SearchPage({
     `${search.params.lat.toFixed(3)}, ${search.params.lng.toFixed(3)}`;
 
   // Defaulted, not assumed: an API that predates the trace work (or a stale
-  // local uvicorn) returns neither field, and destructuring undefined here would
-  // blank the whole page instead of just hiding the progress line.
-  const { done, total } = search.progress ?? { done: 0, total: 0 };
+  // local uvicorn) doesn't send `steps`, and reading .length off undefined would
+  // blank the whole page. (`progress` is read by LiveStatusCard, defended there.)
   const steps = search.steps ?? [];
-  const status: { tone: "working" | "done" | "failed"; text: string } =
-    inProgress
-      ? {
-          tone: "working",
-          text: total
-            ? `Looking at ${Math.min(done + 1, total)} of ${total} places nearby…`
-            : "Finding places nearby…",
-        }
-      : search.status === "failed"
-        ? { tone: "failed", text: "This search didn't finish" }
-        : search.status === "cancelled"
-          ? {
-              tone: "done",
-              text: `Stopped — ${found.length} ${found.length === 1 ? "place" : "places"} found before you stopped`,
-            }
-          : {
-              tone: "done",
-              text:
-                found.length === 0
-                  ? "Search complete — nothing worth contacting"
-                  : `Search complete — ${found.length} ${found.length === 1 ? "place" : "places"} worth contacting`,
-            };
+  // While it runs, LiveStatusCard owns the map overlay; the pill only reports
+  // finished states, so the two can never contradict each other.
+  const status: { tone: "done" | "failed"; text: string } | null = inProgress
+    ? null
+    : search.status === "failed"
+      ? { tone: "failed" as const, text: "This search didn't finish" }
+      : search.status === "cancelled"
+        ? {
+            tone: "done" as const,
+            text: `Stopped — ${found.length} ${found.length === 1 ? "place" : "places"} found before you stopped`,
+          }
+        : {
+            tone: "done" as const,
+            text:
+              found.length === 0
+                ? "Search complete — nothing worth contacting"
+                : `Search complete — ${found.length} ${found.length === 1 ? "place" : "places"} worth contacting`,
+          };
 
   const hasResults = found.length > 0;
   // While it runs, the trace is the panel. Afterwards the results are, unless
   // the user asks to see the working. Either way, no findings and no steps
   // means no column at all rather than an empty gutter beside the map.
   const showingTrace = showTrace && (inProgress || steps.length > 0);
+  const stop = async () => {
+    setStopping(true);
+    setStopError(null);
+    try {
+      await stopSearch(id);
+      setSearch((s) => (s ? { ...s, status: "cancelled" } : s));
+    } catch (e) {
+      setStopError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStopping(false);
+    }
+  };
+
   const panel = showingTrace ? (
-    <TracePanel
-      search={search}
-      stopping={stopping}
-      stopError={stopError}
-      onStop={async () => {
-        setStopping(true);
-        setStopError(null);
-        try {
-          await stopSearch(id);
-          setSearch((s) => (s ? { ...s, status: "cancelled" } : s));
-        } catch (e) {
-          setStopError(e instanceof Error ? e.message : String(e));
-        } finally {
-          setStopping(false);
-        }
-      }}
-    />
+    <TracePanel search={search} />
   ) : hasResults ? (
     <ResultsPanel search={search} />
   ) : undefined;
@@ -185,17 +180,44 @@ export default function SearchPage({
             {titleCase(search.params.roles.join(", "))} · {place} ·{" "}
             {search.params.radius_km} km
           </span>
-          <Link
-            href="/"
-            className="flex-none rounded-pill bg-paper-deep px-3 py-[5px] text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
-          >
-            Refine
-          </Link>
+          {inProgress ? (
+            <button
+              type="button"
+              onClick={stop}
+              disabled={stopping}
+              className="flex-none rounded-pill bg-paper-deep px-3 py-[5px] text-[11.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pin disabled:opacity-50"
+            >
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          ) : (
+            <Link
+              href="/"
+              className="flex-none rounded-pill bg-paper-deep px-3 py-[5px] text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
+            >
+              Refine
+            </Link>
+          )}
         </MapBar>
       }
       mapOverlay={
         <>
-          <StatusPill tone={status.tone}>{status.text}</StatusPill>
+          {inProgress ? (
+            <>
+              <MapActivityPing />
+              <LiveStatusCard search={search} />
+            </>
+          ) : (
+            status && <StatusPill tone={status.tone}>{status.text}</StatusPill>
+          )}
+
+          {stopError && (
+            <div
+              role="alert"
+              className="absolute top-20 right-5 left-5 rounded-panel border border-pin/40 bg-surface-plain px-4 py-2.5 text-[12px] text-pin shadow-bar lg:left-auto lg:w-[330px]"
+            >
+              {stopError}
+            </div>
+          )}
 
           {/* A failed search must never read like an empty one. */}
           {search.status === "failed" && (
