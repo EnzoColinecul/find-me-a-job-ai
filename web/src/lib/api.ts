@@ -42,6 +42,19 @@ export interface SearchParams {
   radius_km: number;
   roles: RoleSpec[];
   query_text?: string;
+  /** Human-readable place the user picked, e.g. "Surry Hills NSW 2010". */
+  location_label?: string;
+}
+
+/** A row in the workspace's recent-searches rail. Descriptive only — no status. */
+export interface SearchSummary {
+  search_id: string;
+  roles: string[];
+  location_label: string;
+  lat: number;
+  lng: number;
+  radius_km: number;
+  created_at: string;
 }
 
 export interface SearchResult {
@@ -51,12 +64,17 @@ export interface SearchResult {
   opportunity_type: string;
   links: string[];
   emails: string[];
+  /** The agent's one-line justification for returning this company. */
+  evidence: string;
+  /** The company's own site — used to tell their careers page from a job board. */
+  website: string;
 }
 
 export interface Search {
   search_id: string;
   status: "pending" | "running" | "completed" | "failed";
-  params: SearchParams;
+  /** Roles come back as plain labels here, not RoleSpecs. */
+  params: Omit<SearchParams, "roles"> & { roles: string[] };
   results: SearchResult[];
   total: number;
 }
@@ -111,6 +129,14 @@ export async function interpretRoles(
   });
   if (!resp.ok) throw new Error(`Could not interpret that: ${resp.status}`);
   return resp.json();
+}
+
+/** Recent searches for the workspace rail. Newest first. */
+export async function listSearches(limit = 10): Promise<SearchSummary[]> {
+  const resp = await authed(`/searches?limit=${limit}`);
+  if (!resp.ok) throw new Error(`listSearches failed: ${resp.status}`);
+  const data = await resp.json();
+  return data.searches;
 }
 
 export async function getSearch(searchId: string): Promise<Search> {

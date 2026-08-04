@@ -1,9 +1,16 @@
 """Search creation and retrieval.
 
 Table items:
-  SEARCH#<id> / META               — params, status, owner, counts
-  SEARCH#<id> / RESULT#<place_id>  — written incrementally by the agent pipeline
+  SEARCH#<id> / META                       — params, status, owner, counts
+  SEARCH#<id> / RESULT#<place_id>          — written incrementally by the pipeline
+  USER#<sub> / SEARCH#<created_at>#<id>    — owner index, for the workspace rail
 Status: pending -> running -> completed | failed
+
+The owner index is the adjacency-list pattern rather than a GSI: listing a user's
+searches is then a plain query on their own partition, with no extra provisioned
+capacity and no infra change. It deliberately stores only descriptive fields (roles,
+location, radius) and NOT status — status lives on META and would go stale here,
+and the rail links straight through to the search page, which polls it live.
 """
 import json
 import logging
@@ -11,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -35,6 +43,9 @@ class SearchRequest(BaseModel):
     # Free-text the user typed, kept for analytics/eval (what did they ask for vs
     # what did the LLM propose vs what did they confirm).
     query_text: str | None = None
+    # Human-readable place the user picked ("Surry Hills NSW 2010"), for the
+    # workspace's recent-searches rail. Coordinates are the source of truth.
+    location_label: str | None = Field(default=None, max_length=200)
     roles: list[RoleSpec] = Field(min_length=1)
 
     @field_validator("roles", mode="before")
@@ -144,10 +155,27 @@ def create_search(sub: str, req: SearchRequest) -> dict:
         "radius_km": str(req.radius_km),
         "roles": [r.model_dump() for r in req.roles],
         "query_text": req.query_text or "",
+        "location_label": req.location_label or "",
         "status": "pending",
         "created_at": now,
     }
     _get_table().put_item(Item=meta)
+
+    # Owner index. Sorting by created_at inside the SK means "most recent first"
+    # is just a reverse query — no filtering, no scan.
+    _get_table().put_item(
+        Item={
+            "PK": f"USER#{sub}",
+            "SK": f"SEARCH#{now}#{search_id}",
+            "search_id": search_id,
+            "roles": [r.label for r in req.roles],
+            "location_label": req.location_label or "",
+            "lat": str(req.lat),
+            "lng": str(req.lng),
+            "radius_km": str(req.radius_km),
+            "created_at": now,
+        }
+    )
 
     if settings.state_machine_arn:
         try:
@@ -174,6 +202,28 @@ def create_search(sub: str, req: SearchRequest) -> dict:
     return meta
 
 
+def list_searches(sub: str, limit: int = 10) -> list[dict]:
+    """The user's most recent searches, newest first — the workspace left rail."""
+    resp = _get_table().query(
+        KeyConditionExpression=Key("PK").eq(f"USER#{sub}")
+        & Key("SK").begins_with("SEARCH#"),
+        ScanIndexForward=False,
+        Limit=limit,
+    )
+    return [
+        {
+            "search_id": i["search_id"],
+            "roles": list(i.get("roles", [])),
+            "location_label": i.get("location_label", ""),
+            "lat": float(i["lat"]),
+            "lng": float(i["lng"]),
+            "radius_km": float(i["radius_km"]),
+            "created_at": i["created_at"],
+        }
+        for i in resp.get("Items", [])
+    ]
+
+
 def get_search(sub: str, search_id: str) -> dict | None:
     """Return META + results for the owner, or None if not found / not owner."""
     resp = _get_table().query(
@@ -196,6 +246,7 @@ def get_search(sub: str, search_id: str) -> dict | None:
             "roles": [r["label"] if isinstance(r, dict) else r
                       for r in meta.get("roles", [])],
             "query_text": meta.get("query_text", ""),
+            "location_label": meta.get("location_label", ""),
         },
         "created_at": meta["created_at"],
         "results": [
@@ -206,6 +257,10 @@ def get_search(sub: str, search_id: str) -> dict | None:
                 "opportunity_type": r.get("opportunity_type", "pending"),
                 "links": list(r.get("links", [])),
                 "emails": list(r.get("emails", [])),
+                # The agent's one-line justification. Stored by the pipeline
+                # since Phase 3; the results page now shows it.
+                "evidence": r.get("evidence", ""),
+                "website": r.get("website", ""),
             }
             for r in results
         ],

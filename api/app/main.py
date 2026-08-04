@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
@@ -9,7 +9,13 @@ from pydantic import BaseModel
 logger = logging.getLogger("fmaj")
 
 from app.auth import AuthUser, require_user
-from app.searches import QuotaExhausted, SearchRequest, create_search, get_search
+from app.searches import (
+    QuotaExhausted,
+    SearchRequest,
+    create_search,
+    get_search,
+    list_searches,
+)
 from app.settings import settings
 from app.users import ensure_user
 
@@ -94,6 +100,19 @@ def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> d
             detail="Your free search has been used. Subscriptions are coming soon!",
         ) from None
     return {"search_id": meta["search_id"], "status": meta["status"]}
+
+
+@app.get("/searches")
+def list_searches_route(
+    limit: int = Query(default=10, ge=1, le=50),
+    user: AuthUser = Depends(require_user),
+) -> dict:
+    """The signed-in user's recent searches, newest first (workspace left rail).
+
+    Descriptive only — no status. The rail links through to /searches/{id}, which
+    polls the live status, so nothing here can go stale.
+    """
+    return {"searches": list_searches(user.sub, limit)}
 
 
 @app.get("/searches/{search_id}")

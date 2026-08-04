@@ -24,9 +24,32 @@ class FakeTable:
             )
         item["free_search_used"] = True
 
-    def query(self, KeyConditionExpression, ExpressionAttributeValues):  # noqa: N803
-        pk = ExpressionAttributeValues[":pk"]
-        return {"Items": [v for (p, _), v in self.store.items() if p == pk]}
+    def query(  # noqa: N803
+        self,
+        KeyConditionExpression,
+        ExpressionAttributeValues=None,
+        ScanIndexForward=True,
+        Limit=None,
+    ):
+        """Supports both call styles: the raw "PK = :pk" string used by get_search,
+        and the boto3 Key() condition objects used by list_searches."""
+        if ExpressionAttributeValues is not None:
+            pk = ExpressionAttributeValues[":pk"]
+            prefix = ""
+        else:
+            values = KeyConditionExpression.get_expression()["values"]
+            pk = values[0].get_expression()["values"][1]
+            prefix = values[1].get_expression()["values"][1]
+
+        items = [
+            v
+            for (p, s), v in self.store.items()
+            if p == pk and s.startswith(prefix)
+        ]
+        items.sort(key=lambda i: i["SK"], reverse=not ScanIndexForward)
+        if Limit is not None:
+            items = items[:Limit]
+        return {"Items": items}
 
 
 @pytest.fixture()
@@ -109,6 +132,47 @@ def test_get_search_owner_only(table) -> None:
     assert mine is not None and mine["status"] == "pending"
     assert searches.get_search("intruder", sid) is None
     assert searches.get_search("u1", "nope") is None
+
+
+def test_list_searches_newest_first_and_owner_scoped(table, monkeypatch) -> None:
+    from app.settings import settings
+
+    # The free-search quota caps a real user at one search, so lift it here to
+    # exercise ordering the way a subscribed user would see it.
+    monkeypatch.setattr(settings, "max_roles", 3)
+    _user(table)
+    _user(table, sub="u2")
+
+    for role, label in [("chef", "Surry Hills"), ("barista", "Newtown")]:
+        table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+        searches.create_search(
+            "u1",
+            SearchRequest(**{**VALID, "roles": [role], "location_label": label}),
+        )
+    searches.create_search(
+        "u2", SearchRequest(**{**VALID, "roles": ["retail assistant"]})
+    )
+
+    mine = searches.list_searches("u1")
+    assert [s["roles"] for s in mine] == [["barista"], ["chef"]]  # newest first
+    assert mine[0]["location_label"] == "Newtown"
+    assert len(searches.list_searches("u2")) == 1
+    assert searches.list_searches("nobody") == []
+
+
+def test_list_searches_respects_limit(table) -> None:
+    _user(table)
+    for _ in range(3):
+        table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+        searches.create_search("u1", SearchRequest(**VALID))
+    assert len(searches.list_searches("u1", limit=2)) == 2
+
+
+def test_profile_item_is_not_listed_as_a_search(table) -> None:
+    """USER#<sub> holds PROFILE alongside the search index — don't confuse them."""
+    _user(table)
+    searches.create_search("u1", SearchRequest(**VALID))
+    assert len(searches.list_searches("u1")) == 1
 
 
 def test_get_search_includes_results(table) -> None:
