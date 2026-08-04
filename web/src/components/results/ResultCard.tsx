@@ -3,16 +3,16 @@
 import { useState } from "react";
 import type { SearchResult } from "@/lib/api";
 import { classifyLinks, type LinkKind } from "@/lib/links";
-import { Card, TagChip, type TagTone } from "@/components/ui";
+import { cx } from "../ui/cx";
 
 /** Live listings read as "found"; search pages and informal posts stay muted. */
-const TONES: Record<LinkKind, TagTone> = {
-  live_listing: "found",
-  careers_page: "info",
-  company_profile: "info",
-  board_search: "muted",
-  community_post: "muted",
-  other: "muted",
+const TONE: Record<LinkKind, string> = {
+  live_listing: "border-success/40 bg-success/10 text-success-deep",
+  careers_page: "border-accent/30 bg-accent/10 text-accent",
+  company_profile: "border-accent/30 bg-accent/10 text-accent",
+  board_search: "border-line-plain bg-paper-deep text-slate-muted",
+  community_post: "border-line-plain bg-paper-deep text-slate-muted",
+  other: "border-line-plain bg-paper-deep text-slate-muted",
 };
 
 function CopyButton({ value }: { value: string }) {
@@ -27,73 +27,119 @@ function CopyButton({ value }: { value: string }) {
           setCopied(true);
           setTimeout(() => setCopied(false), 1800);
         } catch {
-          // Clipboard can be blocked (insecure context, permissions). Say so
-          // rather than silently pretending the copy worked.
+          // Clipboard can be blocked (insecure context, permissions). Say
+          // nothing rather than pretend the copy worked.
           setCopied(false);
         }
       }}
-      className="rounded-pill border border-line-plain px-2.5 py-1 text-[12px] font-semibold text-slate-muted transition-colors duration-150 hover:border-line hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+      className="flex-none rounded-pill bg-paper-deep px-2.5 py-1 text-[10.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
     >
       {copied ? "Copied" : "Copy"}
     </button>
   );
 }
 
-export default function ResultCard({ result }: { result: SearchResult }) {
+/**
+ * One company in the results column (mockup 4).
+ *
+ * `index` numbers the card. The mockup also drops a matching numbered pin on
+ * the map; that needs each company's coordinates, which the pipeline reads from
+ * Places but doesn't persist — logged as a follow-up rather than faked here.
+ */
+export default function ResultCard({
+  result,
+  index,
+  featured = false,
+}: {
+  result: SearchResult;
+  index: number;
+  featured?: boolean;
+}) {
   const links = classifyLinks(result.links);
 
   return (
-    <Card className="px-4 py-4">
-      <h3 className="m-0 text-[15px] font-bold text-ink">{result.company}</h3>
-      {result.address && (
-        <p className="mt-0.5 mb-0 text-[13px] text-slate-muted">
-          {result.address}
-        </p>
+    <article
+      className={cx(
+        "rounded-panel border p-3.5",
+        featured
+          ? "border-accent/30 bg-accent/6"
+          : "border-line-cool bg-surface-plain",
       )}
+    >
+      <div className="flex items-start gap-2.5">
+        <span
+          aria-hidden="true"
+          className={cx(
+            "mt-px flex h-[19px] w-[19px] flex-none items-center justify-center rounded-full text-[11px] font-bold text-white",
+            featured ? "bg-pin" : "bg-accent-strong",
+          )}
+        >
+          {index}
+        </span>
 
-      {links.length > 0 && (
-        <ul className="mt-3 grid list-none gap-2 p-0">
-          {links.map((l) => (
-            <li key={l.url} className="grid gap-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <TagChip tone={TONES[l.kind]}>{l.label}</TagChip>
-                {l.note && (
-                  <span className="text-[11px] text-slate-muted">{l.note}</span>
-                )}
-              </div>
-              <a
-                href={l.url}
-                target="_blank"
-                rel="noreferrer noopener"
-                title={l.url}
-                className="truncate text-[13px]"
-              >
-                {l.display}
-              </a>
-            </li>
-          ))}
-        </ul>
-      )}
+        <div className="min-w-0 flex-1">
+          <h3 className="m-0 text-[13.5px] font-bold text-ink">
+            {result.company}
+          </h3>
+          {result.address && (
+            <p className="mt-[3px] mb-2 text-[11.5px] leading-[1.45] text-slate-muted">
+              {result.address}
+            </p>
+          )}
 
-      {result.emails.length > 0 && (
-        <ul className="mt-3 grid list-none gap-2 p-0">
-          {result.emails.map((m) => (
-            <li key={m} className="flex flex-wrap items-center gap-2">
-              <TagChip tone="info">✉️ Contact</TagChip>
-              <code className="rounded-tag bg-paper-deep px-1.5 py-0.5 text-[13px] text-ink">
-                {m}
-              </code>
-              <CopyButton value={m} />
-            </li>
-          ))}
-        </ul>
-      )}
+          {links.length > 0 && (
+            <ul className="m-0 flex list-none flex-col gap-2 p-0">
+              {links.map((l) => (
+                <li key={l.url} className="flex flex-col gap-0.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={cx(
+                        "rounded-pill border px-1.5 py-px text-[10px] font-semibold",
+                        TONE[l.kind],
+                      )}
+                    >
+                      {l.label}
+                    </span>
+                    {l.note && (
+                      <span className="text-[10px] text-slate-faint">
+                        {l.note}
+                      </span>
+                    )}
+                  </div>
+                  <a
+                    href={l.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    title={l.url}
+                    className="text-[11.5px] break-all"
+                  >
+                    {l.display}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
 
-      {result.evidence && (
-        <p className="mt-3 mb-0 border-t border-line-soft pt-2.5 text-[12px] leading-normal text-slate-muted">
-          {result.evidence}
-        </p>
-      )}
-    </Card>
+          {result.emails.length > 0 && (
+            <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0">
+              {result.emails.map((m) => (
+                <li key={m} className="flex items-center gap-2">
+                  <code className="min-w-0 truncate font-mono text-[11.5px] text-ink">
+                    {m}
+                  </code>
+                  <CopyButton value={m} />
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {result.evidence && (
+            <p className="mt-2.5 mb-0 border-t border-line-cool pt-2 text-[11px] leading-normal text-slate-muted">
+              {result.evidence}
+            </p>
+          )}
+        </div>
+      </div>
+    </article>
   );
 }

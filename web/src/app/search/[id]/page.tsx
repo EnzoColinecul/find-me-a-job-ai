@@ -1,37 +1,49 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
-import { getSearch, type Search } from "@/lib/api";
-import ResultCard from "@/components/results/ResultCard";
-import { Button, Card } from "@/components/ui";
+import { getMe, getSearch, type Me, type Search } from "@/lib/api";
+import WorkspaceShell from "@/components/workspace/WorkspaceShell";
+import { MapBar, SearchGlyph, StatusPill } from "@/components/workspace/MapBar";
+import ResultsPanel, { foundResults } from "@/components/results/ResultsPanel";
 
 const POLL_MS = 3000;
-
-/** Types the agent reports. "pending" rows are companies not yet investigated. */
-const GROUPS: Array<{ type: string; label: string }> = [
-  { type: "job_listing", label: "Jobs found" },
-  { type: "careers_page", label: "Careers pages" },
-  { type: "contact_email", label: "Worth emailing" },
-];
 
 function titleCase(s: string): string {
   return s.replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Centred({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-dvh px-4 py-6 sm:px-6">
-      <div className="mx-auto max-w-[760px]">{children}</div>
-    </div>
+    <main className="flex min-h-dvh items-center justify-center px-5">
+      <div className="max-w-[46ch] text-center">{children}</div>
+    </main>
   );
 }
 
-export default function SearchPage({ params }: { params: Promise<{ id: string }> }) {
+/**
+ * Mockup 4 — the same shell as the workspace with the results column open.
+ *
+ * Results are not a separate page: the map stays on screen so you can see where
+ * the search was centred while you read what came back.
+ */
+export default function SearchPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
   const { id } = use(params);
+  const router = useRouter();
+  const [me, setMe] = useState<Me | null>(null);
   const [search, setSearch] = useState<Search | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getMe()
+      .then(setMe)
+      .catch(() => setMe(null));
+  }, []);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -58,126 +70,107 @@ export default function SearchPage({ params }: { params: Promise<{ id: string }>
 
   if (error)
     return (
-      <Shell>
-        <Card className="px-4 py-4">
-          <p role="alert" className="m-0 mb-3 text-sm text-pin">
-            {error}
-          </p>
-          <Link href="/" className="text-[13px] font-semibold">
-            ← New search
-          </Link>
-        </Card>
-      </Shell>
+      <Centred>
+        <p role="alert" className="m-0 mb-3 text-sm text-pin">
+          {error}
+        </p>
+        <Link href="/" className="text-[13px] font-semibold">
+          ← New search
+        </Link>
+      </Centred>
     );
 
-  if (!search)
+  if (!search || !me)
     return (
-      <Shell>
+      <Centred>
         <p className="text-sm text-slate-muted">Loading…</p>
-      </Shell>
+      </Centred>
     );
 
   const inProgress = search.status === "pending" || search.status === "running";
-  const known = new Set(GROUPS.map((g) => g.type));
-  const found = search.results.filter((r) => known.has(r.opportunity_type));
-  const grouped = GROUPS.map((g) => ({
-    label: g.label,
-    items: found.filter((r) => r.opportunity_type === g.type),
-  })).filter((g) => g.items.length > 0);
-
+  const found = foundResults(search);
   const place =
     search.params.location_label ||
     `${search.params.lat.toFixed(3)}, ${search.params.lng.toFixed(3)}`;
 
-  const statusLine = inProgress
-    ? `Looking at ${search.total} ${search.total === 1 ? "place" : "places"} nearby…`
-    : search.status === "completed"
-      ? found.length === 0
-        ? "Search complete — nothing worth contacting this time"
-        : `Search complete — ${found.length} ${found.length === 1 ? "place" : "places"} worth contacting`
-      : "This search didn't finish";
+  const status: { tone: "working" | "done" | "failed"; text: string } =
+    inProgress
+      ? {
+          tone: "working",
+          text: `Looking at ${search.total} ${search.total === 1 ? "place" : "places"} nearby…`,
+        }
+      : search.status === "failed"
+        ? { tone: "failed", text: "This search didn't finish" }
+        : {
+            tone: "done",
+            text:
+              found.length === 0
+                ? "Search complete — nothing worth contacting"
+                : `Search complete — ${found.length} ${found.length === 1 ? "place" : "places"} worth contacting`,
+          };
+
+  // No findings yet → no column at all, so the map isn't sitting next to an
+  // empty gutter. The status pill carries the story until something lands.
+  const hasResults = found.length > 0;
 
   return (
-    <Shell>
-      {/* Header: what was searched, and a way back to change it */}
-      <header className="mb-6 flex flex-wrap items-center gap-3">
-        <Image
-          src="/logo.png"
-          alt=""
-          width={28}
-          height={28}
-          priority
-          className="h-7 w-7 flex-none object-contain"
-        />
-        <div className="min-w-0 flex-1">
-          <h1 className="m-0 truncate text-[15px] font-bold text-ink">
+    <WorkspaceShell
+      me={me}
+      center={{ lat: search.params.lat, lng: search.params.lng }}
+      radiusKm={search.params.radius_km}
+      onNewSearch={() => router.push("/")}
+      rightPanelTitle="Results"
+      rightPanel={hasResults ? <ResultsPanel search={search} /> : undefined}
+      topBar={
+        <MapBar>
+          <SearchGlyph />
+          <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-ink">
             {titleCase(search.params.roles.join(", "))} · {place} ·{" "}
             {search.params.radius_km} km
-          </h1>
-          <p
-            className="m-0 text-[13px] text-slate-muted"
-            aria-live="polite"
+          </span>
+          <Link
+            href="/"
+            className="flex-none rounded-pill bg-paper-deep px-3 py-[5px] text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
           >
-            {statusLine}
-          </p>
-        </div>
-        <Link href="/">
-          <Button variant="secondary" size="sm">
             Refine
-          </Button>
-        </Link>
-      </header>
-
-      {grouped.map((g) => (
-        <section key={g.label} className="mb-7">
-          <h2 className="m-0 mb-1 text-[15px] font-bold text-ink">{g.label}</h2>
-          <p className="m-0 mb-3 text-[12px] text-slate-muted">
-            {g.items.length} {g.items.length === 1 ? "company" : "companies"}{" "}
-            nearby
-          </p>
-          <div className="grid gap-2.5">
-            {g.items.map((r) => (
-              <ResultCard key={r.place_id} result={r} />
-            ))}
-          </div>
-        </section>
-      ))}
-
-      {inProgress && (
-        <Card className="px-4 py-3.5 text-[13px] text-slate-muted">
-          Results appear here as I find them. This usually takes a minute or two.
-        </Card>
-      )}
-
-      {/* A failed search must never look like an empty one — that hides breakage. */}
-      {search.status === "failed" && (
-        <Card className="border-pin/40 bg-pin/6 px-4 py-4">
-          <strong className="text-sm text-ink">
-            Something went wrong with this search.
-          </strong>
-          <p className="mt-1.5 mb-0 text-[13px] leading-normal text-slate-muted">
-            It didn&apos;t finish, so this isn&apos;t a &quot;no results&quot;
-            answer. Please try again — if it keeps happening, the problem is on
-            our side.
-          </p>
-        </Card>
-      )}
-
-      {search.status === "completed" && found.length === 0 && (
-        <Card className="px-5 py-6 text-center">
-          <p className="m-0 mb-1 text-sm font-semibold text-ink">
-            Nothing worth contacting within {search.params.radius_km} km
-          </p>
-          <p className="mx-auto m-0 mb-4 max-w-[42ch] text-[13px] leading-normal text-slate-muted">
-            I checked every business I could find and none had an opening or a
-            way in. A wider radius or a different role usually turns something
-            up.
-          </p>
-          <Link href="/">
-            <Button size="sm">Try another search</Button>
           </Link>
-        </Card>
-      )}
-    </Shell>
+        </MapBar>
+      }
+      mapOverlay={
+        <>
+          <StatusPill tone={status.tone}>{status.text}</StatusPill>
+
+          {/* A failed search must never read like an empty one. */}
+          {search.status === "failed" && (
+            <div className="absolute right-5 bottom-20 left-5 rounded-panel border border-pin/40 bg-surface-plain px-4 py-3 shadow-float lg:left-auto lg:w-[330px]">
+              <strong className="text-[13px] text-ink">
+                Something went wrong with this search.
+              </strong>
+              <p className="mt-1 mb-0 text-[11.5px] leading-normal text-slate-muted">
+                It didn&apos;t finish, so this isn&apos;t a &quot;nothing
+                found&quot; answer. Please try again — if it keeps happening,
+                the problem is on our side.
+              </p>
+            </div>
+          )}
+
+          {search.status === "completed" && found.length === 0 && (
+            <div className="absolute right-5 bottom-20 left-5 rounded-panel bg-surface-plain px-4 py-3.5 shadow-float lg:left-auto lg:w-[330px]">
+              <strong className="text-[13px] text-ink">
+                Nothing worth contacting within {search.params.radius_km} km
+              </strong>
+              <p className="mt-1 mb-2 text-[11.5px] leading-normal text-slate-muted">
+                I checked every business I could find and none had an opening or
+                a way in. A wider radius or a different role usually turns
+                something up.
+              </p>
+              <Link href="/" className="text-[11.5px] font-semibold">
+                Try another search →
+              </Link>
+            </div>
+          )}
+        </>
+      }
+    />
   );
 }
