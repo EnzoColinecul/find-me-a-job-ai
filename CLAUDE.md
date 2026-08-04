@@ -85,7 +85,7 @@ aws dynamodb update-item --table-name fmaj-test-main \
   --profile fmaj-deploy --region ap-southeast-2
 ```
 
-Tests: api 10, agent 20 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
+Tests: api 16, agent 20 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
 
@@ -146,7 +146,18 @@ direction has no designed dark counterpart. Revisit post-beta.
 fonts.googleapis.com at build time and makes CI builds network-dependent.
 
 Primitives to reuse rather than re-roll: `web/src/components/ui/` (`Card`, `Pill`,
-`Button`, `TagChip`) and `web/src/components/StreetMapBackdrop.tsx`.
+`Button`, `TagChip`), `web/src/components/StreetMapBackdrop.tsx`, and
+`web/src/components/map/MapPieces.tsx` (`AddressInput`, `RadiusCircle` — extracted
+when `SearchForm.tsx` was deleted).
+
+Screen flow lives in `web/src/app/page.tsx`: signed out → `LoginScreen`, signed in
+with no interpreted roles → `HomeScreen`, roles interpreted → `Workspace`.
+
+`web/src/lib/links.ts` classifies result links by URL pattern into badge types.
+**Keep it conservative** — an unrecognised path gets a generic badge, never an
+overclaimed "Live listing". The badge is only useful if it's trustworthy without
+clicking. Revisit only if the agent starts returning `{url, kind, label}` from
+`report_findings` (needs a schema change + eval re-run).
 
 **Contrast:** `ink-muted` (~3.4:1) and `slate-faint` (~2.8:1) are below WCAG AA for
 body text — decorative use only. Body copy uses `slate-muted` or `ink`.
@@ -158,6 +169,10 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 - `SEARCH#<id> / META`: params, status pending→running→completed|failed, user_sub.
 - `SEARCH#<id> / RESULT#<place_id>`: written incrementally by the pipeline; frontend
   polls `GET /searches/{id}` every 3s and renders grouped by opportunity_type.
+- `USER#<sub> / SEARCH#<created_at>#<id>`: owner index for `GET /searches` (the
+  workspace rail). Adjacency list, **not a GSI** — no extra provisioned capacity and
+  no infra change. Descriptive fields only, deliberately **no status**: status lives
+  on META and a denormalised copy would go stale.
 
 ## Cost discipline (why the code looks the way it does)
 
@@ -183,11 +198,12 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 - Phases from PLAN.md: 0 foundations ✅ · 1 search UX ✅ (browser-verified) ·
   2 discovery ✅ (harness: ~85% relevance, 100% website coverage) · 3 agent core ✅
   (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
-  pipeline ✅ deployed, real searches returning real leads · Phase 5 design system ✅
-  + login screen ✅ (branch `feat/design-system-and-login`, not yet browser-verified).
-  **Next: Phase 5 continues — home (conversational role input), three-pane workspace,
-  live agent trace, results restyle, mobile. Then Phase 4 (PDF report) and Phase 6
-  (hardening + private beta).**
+  pipeline ✅ deployed, real searches returning real leads · Phase 5: design system ✅
+  login ✅ home ✅ workspace ✅ results restyle + link labels ✅ (branch
+  `feat/design-system-and-login`, **not yet browser-verified**).
+  **Next: Phase 5 remainder — live agent trace panel (the last P0; needs backend
+  work: persist steps mid-flight + Stop → stopExecution) and mobile layouts. Then
+  Phase 4 (PDF report) and Phase 6 (hardening + private beta).**
 
 ## Known state / gotchas
 
