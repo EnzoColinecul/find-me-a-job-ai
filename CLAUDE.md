@@ -129,6 +129,28 @@ user-profile data don't exist. Those are the real backend gaps behind the redesi
 Notion cards live in their own **Phase 5 — UI redesign** (design system → login → home
 → workspace → trace → results → mobile); hardening/beta is now **Phase 6**.
 
+### Frontend styling (decided 2026-08-04 — design-system card, Phase 5)
+
+**Tailwind CSS v4.** Tokens live in one `@theme` block in `web/src/app/globals.css`
+and generate the utilities (`bg-paper`, `bg-surface`, `text-ink`, `text-slate-muted`,
+`border-line`, `rounded-panel`, `shadow-sheet`, the `bg-map-*` fills…). **Never
+hardcode hex outside `globals.css`** — the only sanctioned exceptions are the Google
+brand mark, `viewport.themeColor`, and the Maps `Circle` fallback, each commented
+in place.
+
+**Light-only.** `html { color-scheme: light }` opts out of dark mode; the paper
+direction has no designed dark counterpart. Revisit post-beta.
+
+**Inter** is self-hosted via `next/font/local` from a vendored variable woff2 at
+`web/src/fonts/`. Do not switch to `next/font/google` — it fetches from
+fonts.googleapis.com at build time and makes CI builds network-dependent.
+
+Primitives to reuse rather than re-roll: `web/src/components/ui/` (`Card`, `Pill`,
+`Button`, `TagChip`) and `web/src/components/StreetMapBackdrop.tsx`.
+
+**Contrast:** `ink-muted` (~3.4:1) and `slate-faint` (~2.8:1) are below WCAG AA for
+body text — decorative use only. Body copy uses `slate-muted` or `ink`.
+
 ## Data model (DynamoDB single table `fmaj-{stage}-main`, PK/SK)
 
 - `USER#<cognito-sub> / PROFILE`: email, name, `free_search_used` (quota = atomic
@@ -161,8 +183,10 @@ Notion cards live in their own **Phase 5 — UI redesign** (design system → lo
 - Phases from PLAN.md: 0 foundations ✅ · 1 search UX ✅ (browser-verified) ·
   2 discovery ✅ (harness: ~85% relevance, 100% website coverage) · 3 agent core ✅
   (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
-  pipeline ✅ deployed, real searches returning real leads. **Next: Phase 4 (PDF
-  report), Phase 5 (UI redesign — start with the design-system card), Phase 6
+  pipeline ✅ deployed, real searches returning real leads · Phase 5 design system ✅
+  + login screen ✅ (branch `feat/design-system-and-login`, not yet browser-verified).
+  **Next: Phase 5 continues — home (conversational role input), three-pane workspace,
+  live agent trace, results restyle, mobile. Then Phase 4 (PDF report) and Phase 6
   (hardening + private beta).**
 
 ## Known state / gotchas
