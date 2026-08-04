@@ -123,8 +123,9 @@ Full mobile set included.
 The trace panel's tools map 1:1 onto real ones (`places.nearby`→discovery,
 `fetch_page`→`fetch_url`, `extract_jobs`→careers/Adzuna, `web_search`→SerpAPI,
 `extract_contact`→`extract_emails`), so the backend can emit them — but **steps are
-not persisted mid-flight yet** (only the final `RESULT#`), and recent-searches /
-user-profile data don't exist. Those are the real backend gaps behind the redesign.
+not persisted mid-flight yet** (only the final `RESULT#`). That is now the *one*
+remaining backend gap behind the redesign: recent searches shipped as `GET /searches`,
+and the profile block was scoped to name/email so it needs no new fields.
 
 Notion cards live in their own **Phase 5 — UI redesign** (design system → login → home
 → workspace → trace → results → mobile); hardening/beta is now **Phase 6**.
