@@ -207,7 +207,7 @@ export default function AddressInput({
                 void choose(i);
               }}
               className={[
-                "cursor-pointer rounded-card px-3 py-2 text-[13px]",
+                "flex min-h-11 cursor-pointer items-center rounded-card px-3 py-2 text-[13px]",
                 i === active ? "bg-paper-deep" : "",
               ].join(" ")}
             >

@@ -37,7 +37,7 @@ export default function Rail({
       <button
         type="button"
         onClick={onNewSearch}
-        className="flex items-center gap-2 rounded-panel border border-line-cool bg-surface-plain px-3 py-2.5 text-[13px] font-semibold text-ink shadow-card transition-colors duration-150 hover:border-line-plain focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+        className="flex min-h-11 items-center gap-2 rounded-panel border border-line-cool bg-surface-plain px-3 py-2.5 text-[13px] font-semibold text-ink shadow-card transition-colors duration-150 hover:border-line-plain focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
           <path
@@ -75,7 +75,7 @@ export default function Rail({
         <button
           type="button"
           onClick={() => logout()}
-          className="mt-1.5 rounded-card px-1 py-1 text-[11.5px] font-medium text-ink-soft hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+          className="mt-1.5 inline-flex min-h-11 items-center rounded-card px-1 py-1 text-[11.5px] font-medium text-ink-soft hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
         >
           Sign out
         </button>

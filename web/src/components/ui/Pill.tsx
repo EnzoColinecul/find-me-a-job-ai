@@ -20,7 +20,9 @@ export function Pill({
       type={type}
       aria-pressed={selected}
       className={cx(
-        "inline-flex items-center gap-1.5 rounded-pill px-3.5 py-1.5",
+        // min-h-11 (44px) is the touch-target floor — px-3.5/py-1.5 alone
+        // rendered at ~30px, too small to reliably tap on a phone.
+        "inline-flex min-h-11 items-center gap-1.5 rounded-pill px-3.5 py-1.5",
         "text-[13px] font-medium transition-colors duration-150",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong",
         "disabled:cursor-not-allowed disabled:opacity-50",

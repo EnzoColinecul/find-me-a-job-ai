@@ -165,7 +165,7 @@ export default function SearchPage({
           <button
             type="button"
             onClick={() => setShowTrace((v) => !v)}
-            className="rounded-pill px-2 py-0.5 text-[11px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+            className="inline-flex min-h-11 items-center rounded-pill px-2.5 text-[11px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
           >
             {showingTrace
               ? `Results (${found.length})`
@@ -185,14 +185,14 @@ export default function SearchPage({
               type="button"
               onClick={stop}
               disabled={stopping}
-              className="flex-none rounded-pill bg-paper-deep px-3 py-[5px] text-[11.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pin disabled:opacity-50"
+              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[11.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pin disabled:opacity-50"
             >
               {stopping ? "Stopping…" : "Stop"}
             </button>
           ) : (
             <Link
               href="/"
-              className="flex-none rounded-pill bg-paper-deep px-3 py-[5px] text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
+              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
             >
               Refine
             </Link>

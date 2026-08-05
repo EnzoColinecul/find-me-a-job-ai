@@ -56,7 +56,7 @@ export default function RecentSearches({
         <li key={s.search_id}>
           <Link
             href={`/search/${s.search_id}`}
-            className="flex items-center gap-2 rounded-card px-2.5 py-2 text-[12.5px] font-medium text-ink-soft no-underline hover:bg-rail-active"
+            className="flex min-h-11 items-center gap-2 rounded-card px-2.5 py-2 text-[12.5px] font-medium text-ink-soft no-underline hover:bg-rail-active"
           >
             <PinIcon className="flex-none text-rail-muted" />
             <span className="truncate">

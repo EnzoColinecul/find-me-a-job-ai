@@ -240,13 +240,18 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
   pipeline ✅ deployed, real searches returning real leads · Phase 5: design system ✅
   login ✅ home ✅ workspace ✅ results-in-right-panel ✅ + link labels ✅ ·
-  live agent trace 🚧 code-complete, **blocked on `cdk deploy 'Fmaj-Test/Data'`
-  (new TTL attr) + `'Fmaj-Test/Pipeline'` (agent changed)** (branch
-  `feat/design-system-and-login`, **not yet browser-verified**). Deferred: numbered
-  map pins (own card — needs lat/lng persisted → Pipeline redeploy + a Places ToS
-  call) and Refine prefilling the previous params.
-  **Next: mobile layouts (last Phase 5 card), then Phase 4 (PDF report) and
-  Phase 6 (hardening + private beta).**
+  live agent trace ✅ deployed (`Fmaj-Test/Data` + `Fmaj-Test/Pipeline` both
+  redeployed), browser-verified — animated newest-first timeline, Stop wired up ·
+  mobile layouts (login, search, results) 🚧 code-complete: touch targets ≥44px
+  throughout, trace panel collapses to a one-line summary below `lg` with a
+  "Show all steps" toggle, trace⇄results switch no longer `lg`-only. **Not yet
+  verified on a real phone** — this sandbox can't run `next build`/`next dev`
+  (arm64/registry limits) or a browser, so the 375px no-scroll check and
+  pin-drag-with-touch still need a manual pass. Deferred: numbered map pins
+  (own card — needs lat/lng persisted → Pipeline redeploy + a Places ToS call)
+  and Refine prefilling the previous params.
+  **Next: eyeball mobile on a phone, then Phase 4 (PDF report) and Phase 6
+  (hardening + private beta).**
 
 ## Known state / gotchas
 

@@ -27,9 +27,11 @@ function ChoicePill({
       type="button"
       aria-pressed={selected}
       className={cx(
-        "rounded-pill px-3.5 py-[7px] text-[12.5px] font-semibold transition-colors duration-150",
+        // min-h-11 (44px) is the touch-target floor — the old px-3.5/py-[7px]
+        // pills measured ~30px tall, too small to tap reliably on a phone.
+        "inline-flex min-h-11 items-center justify-center rounded-pill px-3.5 text-[12.5px] font-semibold transition-colors duration-150",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong",
-        grow && "flex-1 px-0 py-2 text-center",
+        grow && "flex-1 px-0",
         dashed ? "border border-dashed" : "border",
         selected
           ? "border-accent-strong bg-accent-strong text-white"

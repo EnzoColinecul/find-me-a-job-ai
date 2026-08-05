@@ -80,7 +80,7 @@ export default function HomeScreen({
         <button
           type="button"
           onClick={() => logout()}
-          className="rounded-pill px-2.5 py-1 text-[12px] font-medium text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+          className="inline-flex min-h-11 items-center rounded-pill px-2.5 py-1 text-[12px] font-medium text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
         >
           Sign out
         </button>
@@ -123,7 +123,7 @@ export default function HomeScreen({
               type="submit"
               disabled={busy || !text.trim()}
               aria-label={busy ? "Thinking" : "Find me a job"}
-              className="flex h-[38px] w-[38px] flex-none items-center justify-center rounded-full bg-accent-strong text-white transition-opacity duration-150 hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-11 w-11 flex-none items-center justify-center rounded-full bg-accent-strong text-white transition-opacity duration-150 hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:opacity-40"
             >
               {busy ? (
                 <span className="block h-4 w-4 animate-[spin_0.8s_linear_infinite] rounded-full border-2 border-white/40 border-t-white" />
@@ -157,7 +157,7 @@ export default function HomeScreen({
                   setText(p.text);
                   submit(p.text);
                 }}
-                className="rounded-pill border border-line-cool bg-white/90 px-3.5 py-2 text-[12.5px] font-medium text-slate-strong transition-colors duration-150 hover:border-line-plain hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex min-h-11 items-center justify-center rounded-pill border border-line-cool bg-white/90 px-3.5 text-[12.5px] font-medium text-slate-strong transition-colors duration-150 hover:border-line-plain hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {p.label}
               </button>

@@ -32,7 +32,7 @@ function CopyButton({ value }: { value: string }) {
           setCopied(false);
         }
       }}
-      className="flex-none rounded-pill bg-paper-deep px-2.5 py-1 text-[10.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+      className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-2.5 text-[10.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
     >
       {copied ? "Copied" : "Copy"}
     </button>

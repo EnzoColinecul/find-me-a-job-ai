@@ -152,11 +152,15 @@ export default function WorkspaceShell({
             ].join(" ")}
           >
             {/*
-             * Collapsing is a >=lg affordance. Below that the panel is just the
-             * next block in the page and hiding it behind a 44px strip would
-             * only hide the content the user came for.
+             * The collapse-to-a-strip button is a >=lg affordance: below that
+             * the panel is just the next block in the page, and hiding it
+             * behind a 44px strip would only hide the content the user came
+             * for. The trace<->results switch is not that — a phone user who
+             * lands on results still needs a way back to "what I did", so the
+             * row itself (and the switch inside it) stays visible at every
+             * width; only the collapse button is lg-only.
              */}
-            <div className="hidden flex-none items-center gap-1 border-b border-rail-line px-2 py-1.5 lg:flex">
+            <div className="flex min-h-11 flex-none items-center gap-1 border-b border-rail-line px-2 py-1.5">
               <button
                 type="button"
                 onClick={() => setRightOpen((v) => !v)}
@@ -164,7 +168,7 @@ export default function WorkspaceShell({
                 aria-label={
                   rightOpen ? "Hide this panel" : "Show this panel"
                 }
-                className="flex flex-none items-center gap-1.5 rounded-card px-1.5 py-1 hover:bg-rail focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+                className="hidden flex-none items-center gap-1.5 rounded-card px-1.5 py-1 hover:bg-rail focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong lg:flex"
               >
                 <svg
                   width="14"
@@ -191,8 +195,15 @@ export default function WorkspaceShell({
                   </span>
                 )}
               </button>
-              {rightOpen && rightPanelSwitch && (
-                <div className="ml-auto">{rightPanelSwitch}</div>
+              {rightPanelSwitch && (
+                <div
+                  className={[
+                    "ml-auto",
+                    rightOpen ? "" : "hidden lg:hidden",
+                  ].join(" ")}
+                >
+                  {rightPanelSwitch}
+                </div>
               )}
             </div>
 
