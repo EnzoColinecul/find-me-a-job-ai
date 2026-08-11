@@ -93,7 +93,15 @@ function Row({
  * see every step. At `lg` and up it's always fully expanded: the toggle is
  * hidden there because the column has room for the list already.
  */
-export default function TracePanel({ search }: { search: Search }) {
+export default function TracePanel({
+  search,
+  headerAccessory,
+}: {
+  search: Search;
+  /** Mobile-only control shown in the header, e.g. the trace⇄results switch —
+   * on desktop that switch lives in the shell's column bar instead. */
+  headerAccessory?: React.ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
   const steps = search.steps ?? [];
   const live = search.status === "pending" || search.status === "running";
@@ -111,23 +119,31 @@ export default function TracePanel({ search }: { search: Search }) {
             <h2 className="m-0 text-[15px] font-bold text-ink">
               What I&apos;m doing
             </h2>
-            <p className="mt-[3px] mb-0 truncate text-[11.5px] text-slate-muted lg:hidden">
-              {summary}
-            </p>
+            {/* While the search is live, the map's status card already shows this
+                same sentence right above — so only show it here when it isn't
+                duplicated (i.e. looking back at a finished search's trace). */}
+            {!live && (
+              <p className="mt-[3px] mb-0 truncate text-[11.5px] text-slate-muted lg:hidden">
+                {summary}
+              </p>
+            )}
             <p className="mt-[3px] mb-0 hidden text-[11.5px] text-slate-muted lg:block">
               Live view of every step
             </p>
           </div>
-          {ordered.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setExpanded((v) => !v)}
-              aria-expanded={expanded}
-              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3 text-[11px] font-semibold text-ink lg:hidden"
-            >
-              {expanded ? "Hide steps" : "Show all steps"}
-            </button>
-          )}
+          <div className="flex flex-none items-center gap-2 lg:hidden">
+            {headerAccessory}
+            {ordered.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                aria-expanded={expanded}
+                className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3 text-[11px] font-semibold text-ink"
+              >
+                {expanded ? "Hide steps" : "Show all steps"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

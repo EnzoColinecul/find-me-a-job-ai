@@ -197,7 +197,12 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   polls `GET /searches/{id}` every 3s and renders grouped by opportunity_type.
 - `SEARCH#<id> / STEP#<iso>#<place_id>`: live agent trace, written as each tool
   returns. **TTL'd (7d) via `expires_at`** — progress, not a record, and it keeps
-  Places-derived names from living forever. Nothing else sets that attribute.
+  Places-derived names from living forever.
+- `SEARCH#<id> / BUDGET`: metered-API spend for this search, one attribute per
+  tool, incremented by conditional `ADD` from the parallel company Lambdas
+  (`agent/src/fmaj_agent/budget.py`). **Also TTL'd (7d) via `expires_at`** — a
+  spend counter is progress, not a record, same as `STEP#`. These two are the
+  only items that set that attribute.
 - `USER#<sub> / SEARCH#<created_at>#<id>`: owner index for `GET /searches` (the
   workspace rail). Adjacency list, **not a GSI** — no extra provisioned capacity and
   no infra change. Descriptive fields only, deliberately **no status**: status lives
@@ -205,6 +210,12 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 
 ## Cost discipline (why the code looks the way it does)
 
+- **Nearby Search (New) returns max 20 places and has NO pagination.** Discovery
+  therefore calls it **once per mapped type**, not once with every type bundled —
+  a bundled call caps the entire search at 20 candidates regardless of radius or
+  `MAX_COMPANIES` (this is exactly what limited a 5km Melbourne CBD search to 20).
+  3-5 calls/search on the Pro SKU is ~1000 searches/mo, so it's effectively free;
+  a test asserts the call count. Don't "optimise" it back into one call.
 - Places (New): search calls use **Pro-only field masks** (5K free/mo); `websiteUri`
   needs **Enterprise** Place Details (1K free/mo → the real monthly ceiling, ~25-33
   searches) so Details is called ONLY for the ≤40 shortlisted companies.
@@ -212,16 +223,29 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 - Places ToS: don't persist place data beyond the search (place_id is exempt).
 - Budgets/caps exist in code, not prompts. Keep per-search cost logged.
 - **Per-search budgets live in `fmaj_agent/config.py`, env-driven, `0 = unlimited`**
-  (`FMAJ_MAX_COMPANIES` 5, `FMAJ_MAX_WEB_SEARCHES` 2 per company,
-  `FMAJ_MAX_TOOL_CALLS` 8, `FMAJ_MAX_SECONDS` 60). Companies run in **parallel**
-  Lambdas so there's no shared live counter — the ceiling is arithmetic:
-  `MAX_COMPANIES × MAX_WEB_SEARCHES` = worst-case SerpAPI calls per search
-  (PoC: 5×2=10 → ~25 searches/month against SerpAPI's ~250). `web_search` is the
-  only metered tool; over budget it returns `ok=False` with a reason, which the
-  model can react to and the trace shows as `Skipping` — never a silent drop.
-  `FMAJ_MAX_COMPANIES=0` still caps at `discovery.HARD_MAX_COMPANIES` (40) because
-  Place Details is the Enterprise SKU. The prompt orders tools by cost (own site →
-  Adzuna → `web_search` last); that's guidance, the cap is the guarantee.
+  (`FMAJ_MAX_COMPANIES` 40, `FMAJ_MAX_WEB_SEARCHES` 2 per company,
+  `FMAJ_MAX_WEB_SEARCHES_PER_SEARCH` 10 shared, `FMAJ_MAX_TOOL_CALLS` 8,
+  `FMAJ_MAX_SECONDS` 60).
+- **Breadth and SerpAPI spend are separate knobs — keep them that way.** They
+  weren't: companies run in parallel Lambdas, so the only enforceable ceiling was
+  arithmetic (`MAX_COMPANIES × MAX_WEB_SEARCHES`), and staying inside SerpAPI's
+  ~250/month meant cutting `MAX_COMPANIES` 40→5. That silently cut results per
+  search by 8× — the knob meant to control cost was controlling the product.
+  `budget.DynamoSearchBudget` gives those Lambdas the shared counter they lacked
+  (`SEARCH#<id> / BUDGET`, conditional `ADD`), so `MAX_COMPANIES` now costs only
+  Places Details and `MAX_WEB_SEARCHES_PER_SEARCH` is the real SerpAPI ceiling.
+  Defaults: 40 companies → ~25 searches/mo on Details (Enterprise, 1K free);
+  10 shared web searches → ~25 searches/mo on SerpAPI. **Don't re-couple them by
+  lowering `MAX_COMPANIES` to save SerpAPI quota** — a test asserts they're
+  independent.
+- The per-company `MAX_WEB_SEARCHES` stays as a backstop: `DynamoSearchBudget`
+  **fails open** if DynamoDB errors, which is only safe because the local cap
+  still bounds the damage at the old arithmetic worst case.
+- `web_search` is the only metered tool; over budget it returns `ok=False` with a
+  reason, which the model can react to and the trace shows as `Skipping` — never a
+  silent drop. `FMAJ_MAX_COMPANIES=0` still caps at `discovery.HARD_MAX_COMPANIES`
+  (40) because Place Details is the Enterprise SKU. The prompt orders tools by cost
+  (own site → Adzuna → `web_search` last); that's guidance, the cap is the guarantee.
 
 ## Workflow conventions
 

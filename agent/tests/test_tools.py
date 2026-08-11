@@ -98,3 +98,52 @@ def test_web_search_returns_links(monkeypatch) -> None:
     )
     r = impl.web_search('site:seek.com.au "Cafe X"')
     assert r.ok and r.data["results"][0]["link"].startswith("https://seek")
+
+
+def test_seek_company_slug_formats() -> None:
+    assert impl._seek_company_slug("Virtual IT Group") == "Virtual-IT-Group"
+    assert impl._seek_company_slug("Elegant Media") == "Elegant-Media"
+    assert impl._seek_company_slug("Springtek") == "Springtek"
+    assert impl._seek_company_slug("Ben & Jerry's") == "Ben-and-Jerrys"
+    assert impl._seek_company_slug("Acme Pty Ltd") == "Acme"
+    assert impl._seek_company_slug("  Multiple   Spaces  ") == "Multiple-Spaces"
+
+
+@respx.mock
+def test_seek_company_page_resolves() -> None:
+    impl._robot_cache.clear()
+    respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
+    url = "https://au.seek.com/Virtual-IT-Group-jobs/at-this-company"
+    respx.head(url).mock(return_value=httpx.Response(200))
+    r = impl.find_seek_company_page("Virtual IT Group")
+    assert r.ok
+    assert r.data["url"] == url
+
+
+@respx.mock
+def test_seek_company_page_redirect_to_search_is_rejected() -> None:
+    """A slug with no employer page redirects to a keyword search — reject it."""
+    impl._robot_cache.clear()
+    respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.head("https://au.seek.com/Nowhere-Cafe-jobs/at-this-company").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://au.seek.com/Nowhere-Cafe-jobs"}
+        )
+    )
+    respx.head("https://au.seek.com/Nowhere-Cafe-jobs").mock(
+        return_value=httpx.Response(200)
+    )
+    r = impl.find_seek_company_page("Nowhere Cafe")
+    assert not r.ok
+    assert "no employer page" in r.reason
+
+
+@respx.mock
+def test_seek_company_page_404_is_not_raised() -> None:
+    impl._robot_cache.clear()
+    respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.head("https://au.seek.com/Ghost-Co-jobs/at-this-company").mock(
+        return_value=httpx.Response(404)
+    )
+    r = impl.find_seek_company_page("Ghost Co")
+    assert not r.ok and "404" in r.reason

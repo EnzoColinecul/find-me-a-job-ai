@@ -1,7 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import type { Search, SearchResult } from "@/lib/api";
+import Link from "next/link";
 import ResultCard from "./ResultCard";
 
 /** Types the agent reports. "pending" rows are companies not yet investigated. */
@@ -17,11 +17,41 @@ export function foundResults(search: Search): SearchResult[] {
   return search.results.filter((r) => KNOWN.has(r.opportunity_type));
 }
 
-function Header({ title, sub }: { title: string; sub: string }) {
+/**
+ * The found results in the exact order the panel renders them — grouped by type
+ * in GROUPS order. The card's number is its 1-based position here, so the map's
+ * numbered pins stay in lockstep with the cards by deriving from the same list.
+ */
+export function orderedResults(search: Search): SearchResult[] {
+  const found = foundResults(search);
+  return GROUPS.flatMap((g) =>
+    found.filter((r) => r.opportunity_type === g.type),
+  );
+}
+
+function Header({
+  title,
+  sub,
+  accessory,
+}: {
+  title: string;
+  sub: string;
+  /** Mobile-only control (e.g. the trace⇄results switch). */
+  accessory?: React.ReactNode;
+}) {
   return (
     <div className="flex-none border-b border-rail-line px-5 pt-[18px] pb-3.5">
-      <h2 className="m-0 text-[15px] font-bold text-ink">{title}</h2>
-      <p className="mt-[3px] mb-0 text-[11.5px] text-slate-muted">{sub}</p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="m-0 text-[15px] font-bold text-ink">{title}</h2>
+          <p className="mt-[3px] mb-0 text-[11.5px] text-slate-muted">{sub}</p>
+        </div>
+        {accessory && (
+          <div className="flex flex-none items-center lg:hidden">
+            {accessory}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -31,7 +61,18 @@ function Header({ title, sub }: { title: string; sub: string }) {
  * show — the shell drops the whole column otherwise, so an in-flight or empty
  * search doesn't leave a blank gutter next to the map.
  */
-export default function ResultsPanel({ search }: { search: Search }) {
+export default function ResultsPanel({
+  search,
+  onHover,
+  headerAccessory,
+}: {
+  search: Search;
+  /** Called with a card's place_id on hover/focus (null on leave) so the map
+   * can highlight the matching pin. */
+  onHover?: (placeId: string | null) => void;
+  /** Mobile-only control shown in the header, e.g. the trace⇄results switch. */
+  headerAccessory?: React.ReactNode;
+}) {
   const found = foundResults(search);
 
   const grouped = GROUPS.map((g) => ({
@@ -39,8 +80,7 @@ export default function ResultsPanel({ search }: { search: Search }) {
     items: found.filter((r) => r.opportunity_type === g.type),
   })).filter((g) => g.items.length > 0);
 
-  const inProgress =
-    search.status === "pending" || search.status === "running";
+  const inProgress = search.status === "pending" || search.status === "running";
 
   // Numbering runs across the whole column so a card's number is stable
   // regardless of which group it landed in.
@@ -53,6 +93,7 @@ export default function ResultsPanel({ search }: { search: Search }) {
         sub={`${found.length} ${found.length === 1 ? "company" : "companies"} nearby${
           inProgress ? " · still looking" : " · updated just now"
         }`}
+        accessory={headerAccessory}
       />
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-5 py-4">
@@ -70,7 +111,7 @@ export default function ResultsPanel({ search }: { search: Search }) {
                   key={r.place_id}
                   result={r}
                   index={n}
-                  featured={n === 1}
+                  onHover={onHover}
                 />
               );
             })}

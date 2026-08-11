@@ -16,12 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fmaj_agent import config
+from fmaj_agent.budget import NoSharedBudget, SearchBudget
 from fmaj_agent.models import Company, Findings, OpportunityType
 from fmaj_agent.providers import get_provider
 from fmaj_agent.tools import (
     extract_emails,
     fetch_url,
     find_careers_link,
+    find_seek_company_page,
     search_jobs_adzuna,
     web_search,
 )
@@ -46,6 +48,7 @@ _DISPATCH = {
     "fetch_url": lambda a: fetch_url(a["url"]),
     "find_careers_link": lambda a: find_careers_link(a["url"]),
     "search_jobs_adzuna": lambda a: search_jobs_adzuna(a["company"], a["role"]),
+    "find_seek_company_page": lambda a: find_seek_company_page(a["company"]),
     "web_search": lambda a: web_search(a["query"]),
     "extract_emails": lambda a: extract_emails(a["url"]),
 }
@@ -80,10 +83,14 @@ class AgentRun:
         }
 
 
-def _over_budget(run: AgentRun, tool: str) -> str | None:
+def _over_budget(run: AgentRun, tool: str, budget: SearchBudget) -> str | None:
     """Reserve one call of a metered tool. Returns a refusal reason, or None.
 
-    Counts the call only when it is allowed, so `metered_calls` records real
+    Two gates, in-process first: the per-company cap costs nothing to check, so
+    checking it first avoids a DynamoDB write for a call we were going to refuse
+    anyway.
+
+    Counts the call only when both allow it, so `metered_calls` records real
     paid-API usage rather than attempts.
     """
     if tool not in _METERED:
@@ -92,6 +99,9 @@ def _over_budget(run: AgentRun, tool: str) -> str | None:
     used = run.metered_calls.get(tool, 0)
     if cap and used >= cap:  # cap == 0 means unlimited
         return f"budget reached: {cap} {tool} call(s) per company"
+    denial = budget.reserve(tool)
+    if denial is not None:
+        return denial
     run.metered_calls[tool] = used + 1
     return None
 
@@ -147,13 +157,22 @@ def _findings_from_report(args: dict) -> Findings:
     )
 
 
-def investigate(company: Company, on_step: StepSink = noop_sink) -> AgentRun:
+def investigate(
+    company: Company,
+    on_step: StepSink = noop_sink,
+    budget: SearchBudget | None = None,
+) -> AgentRun:
     """Run the full investigation for one company. Never raises.
 
     `on_step` is called as each tool completes so the UI can show the run while
     it is still happening. A sink that throws must never take the search down
     with it — see `_emit`.
+
+    `budget` meters paid tools across every company in the same search. Defaults
+    to no shared ceiling, which is right for a local run: there is only one
+    company in flight, so the per-company cap already is the per-search cap.
     """
+    budget = budget or NoSharedBudget()
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
     start = time.monotonic()
 
@@ -217,7 +236,7 @@ def investigate(company: Company, on_step: StepSink = noop_sink) -> AgentRun:
                     continue
                 run.tool_calls += 1
 
-                denial = _over_budget(run, tu.name)
+                denial = _over_budget(run, tu.name, budget)
                 if denial is not None:
                     # Refuse rather than silently dropping the call: the model is
                     # told why, so it can fall back to a cheaper source, and the

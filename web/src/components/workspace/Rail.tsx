@@ -24,12 +24,22 @@ export default function Rail({
   recent,
   loadingRecent,
   onNewSearch,
+  newSearchDisabledReason,
 }: {
   me: Me;
   recent: SearchSummary[];
   loadingRecent: boolean;
   onNewSearch: () => void;
+  /**
+   * Set once the free search is spent. The button is the door to the free-text
+   * step, and that step calls `POST /roles/interpret` — a paid LLM call on a
+   * request that can only end in a 402. Closing the door is cheaper than
+   * apologising after it.
+   */
+  newSearchDisabledReason?: string | null;
 }) {
+  const blocked = Boolean(newSearchDisabledReason);
+
   return (
     <div className="flex h-full flex-col gap-0 px-3 py-4">
       <AppMark size={24} className="px-1 pb-4" />
@@ -37,7 +47,9 @@ export default function Rail({
       <button
         type="button"
         onClick={onNewSearch}
-        className="flex min-h-11 items-center gap-2 rounded-panel border border-line-cool bg-surface-plain px-3 py-2.5 text-[13px] font-semibold text-ink shadow-card transition-colors duration-150 hover:border-line-plain focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+        disabled={blocked}
+        aria-describedby={blocked ? "new-search-blocked" : undefined}
+        className="flex min-h-11 items-center gap-2 rounded-panel border border-line-cool bg-surface-plain px-3 py-2.5 text-[13px] font-semibold text-ink shadow-card transition-colors duration-150 hover:border-line-plain focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:border-line-cool disabled:text-slate-faint disabled:shadow-none disabled:hover:border-line-cool"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
           <path
@@ -50,6 +62,17 @@ export default function Rail({
         New search
       </button>
 
+      {blocked && (
+        <p
+          id="new-search-blocked"
+          className="m-0 mt-1.5 px-1 text-[11px] leading-snug text-rail-muted"
+        >
+          {newSearchDisabledReason}
+        </p>
+      )}
+
+      {/* Recent searches stay live either way — looking at a search you've
+          already paid for is not a new one. */}
       <div className="mt-[22px]">
         <RailLabel>Recent searches</RailLabel>
         <RecentSearches searches={recent} loading={loadingRecent} />

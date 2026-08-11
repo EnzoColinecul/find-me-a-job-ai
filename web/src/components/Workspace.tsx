@@ -5,11 +5,12 @@ import {
   type AppConfig,
   type Me,
   type RoleSuggestion,
+  type SearchSummary,
 } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AddressInput, type LatLng } from "./map/MapPieces";
-import { MapBar } from "./workspace/MapBar";
+import { type LatLng } from "./map/MapPieces";
+import MapSearchBar from "./workspace/MapSearchBar";
 import StartPanel from "./workspace/StartPanel";
 import WorkspaceShell from "./workspace/WorkspaceShell";
 
@@ -26,24 +27,42 @@ export default function Workspace({
   config,
   suggestions,
   selected,
+  initialCenter,
+  initialRadiusKm,
+  initialLocationLabel,
+  recent,
+  loadingRecent,
   onToggleRole,
   onAddRole,
   onStartOver,
+  newSearchDisabledReason,
 }: {
   me: Me;
   config: AppConfig | null;
   suggestions: RoleSuggestion[];
   selected: string[];
+  /** When the user arrived via "Refine", the previous search's parameters. */
+  initialCenter?: LatLng;
+  initialRadiusKm?: number;
+  initialLocationLabel?: string;
+  /** Passed down so `page.tsx` and the shell share one `GET /searches`. */
+  recent?: SearchSummary[];
+  loadingRecent?: boolean;
   onToggleRole: (label: string) => void;
   onAddRole: (label: string) => void;
   onStartOver: () => void;
+  newSearchDisabledReason?: string | null;
 }) {
   const router = useRouter();
-  const [center, setCenter] = useState<LatLng>(SYDNEY);
-  const [locationLabel, setLocationLabel] = useState("");
-  const [radiusKm, setRadiusKm] = useState<number>(5);
+  const [center, setCenter] = useState<LatLng>(initialCenter ?? SYDNEY);
+  const [locationLabel, setLocationLabel] = useState(initialLocationLabel ?? "");
+  /** Pin position waiting on an address. Null while nothing is outstanding. */
+  const [resolving, setResolving] = useState<LatLng | null>(null);
+  const [radiusKm, setRadiusKm] = useState<number>(initialRadiusKm ?? 5);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped when geolocation lands, to move focus on to the radius choices. */
+  const [focusRadius, setFocusRadius] = useState(0);
 
   // Radius choices come from GET /config — never hardcoded. The literal is only
   // the pre-config placeholder; useMemo keeps it referentially stable so the
@@ -57,10 +76,33 @@ export default function Workspace({
     if (!radiusOptions.includes(radiusKm)) setRadiusKm(radiusOptions[0]);
   }, [radiusOptions, radiusKm]);
 
-  const onPlace = useCallback((p: LatLng, label: string) => {
+  /** Autocomplete or geolocation: coordinates and address arrive together. */
+  const onPick = useCallback((p: LatLng, label: string) => {
     setCenter(p);
     setLocationLabel(label);
+    setResolving(null);
   }, []);
+
+  /*
+   * Pin dragged, or the map clicked. The old address now describes somewhere
+   * else, so clear it immediately and ask the bar to look up the new point —
+   * showing a stale suburb next to a moved pin is worse than showing nothing.
+   *
+   * `onDragEnd`/`onClick` are the only callers, so this is once per settled
+   * position, not once per drag frame.
+   */
+  const onPinMove = useCallback((p: LatLng) => {
+    setCenter(p);
+    setLocationLabel("");
+    setResolving(p);
+  }, []);
+
+  const onLabel = useCallback((label: string) => {
+    setLocationLabel(label);
+    setResolving(null);
+  }, []);
+
+  const onLocated = useCallback(() => setFocusRadius((n) => n + 1), []);
 
   const start = async () => {
     setSubmitting(true);
@@ -93,6 +135,7 @@ export default function Workspace({
       radiusOptions={radiusOptions}
       submitting={submitting}
       error={error}
+      focusRadiusSignal={focusRadius}
       onToggleRole={onToggleRole}
       onAddRole={onAddRole}
       onRadius={setRadiusKm}
@@ -105,16 +148,21 @@ export default function Workspace({
       me={me}
       center={center}
       radiusKm={radiusKm}
-      onCenterChange={setCenter}
+      onCenterChange={onPinMove}
       draggablePin
+      recent={recent}
+      loadingRecent={loadingRecent}
       onNewSearch={onStartOver}
+      newSearchDisabledReason={newSearchDisabledReason}
       topBar={
-        <MapBar>
-          <AddressInput onPlace={onPlace} bias={center} />
-          <span className="hidden flex-none text-[11.5px] text-slate-faint sm:block">
-            Drag the pin to move the centre
-          </span>
-        </MapBar>
+        <MapSearchBar
+          center={center}
+          label={locationLabel}
+          resolve={resolving}
+          onPick={onPick}
+          onLabel={onLabel}
+          onLocated={onLocated}
+        />
       }
       floatingPanel={panel}
       stackedPanel={panel}

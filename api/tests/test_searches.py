@@ -28,15 +28,49 @@ class FakeTable:
         ExpressionAttributeNames=None,
     ):
         item = self.store.get((Key["PK"], Key["SK"]))
+        names = ExpressionAttributeNames or {}
+        values = ExpressionAttributeValues or {}
 
+        def _reject():
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+            )
+
+        # Conditions are matched by the attribute they name rather than parsed:
+        # a real expression parser in a test fake would be a second
+        # implementation to keep correct, and these are the only three shapes
+        # the app ever sends.
         if ConditionExpression is not None:
-            # emulate: attribute_exists(PK) AND free_search_used = :f
-            if item is None or item.get("free_search_used") is not False:
-                raise ClientError(
-                    {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
-                )
-            item["free_search_used"] = True
-            return
+            if "free_search_used" in ConditionExpression:
+                if item is None or item.get("free_search_used") is not False:
+                    _reject()
+                item["free_search_used"] = True
+                return
+
+            if "active_since" in ConditionExpression:
+                # compare-and-swap: the lease must still be what the caller read
+                if item is None or item.get("active_since", "") != values[":expected"]:
+                    _reject()
+                item["active_since"] = values[":now"]
+                item["active_search_id"] = values[":sid"]
+                return
+
+            if "#c" in ConditionExpression:
+                if item is None:
+                    item = {"PK": Key["PK"], "SK": Key["SK"]}
+                    self.store[(Key["PK"], Key["SK"])] = item
+                count = item.get("count")
+                if ":cap" in values:  # reserve
+                    if count is not None and count >= values[":cap"]:
+                        _reject()
+                    item["count"] = (count or 0) + values[":one"]
+                else:  # release
+                    if not count or count <= values[":zero"]:
+                        _reject()
+                    item["count"] = count + values[":minus"]
+                return
+
+            raise AssertionError(f"unhandled condition: {ConditionExpression}")
 
         # Unconditional SET: apply "SET a = :x, b = :y" against the item, mapping
         # #name placeholders back to real attribute names.
@@ -140,11 +174,118 @@ def test_create_search_consumes_quota(table) -> None:
     assert table.store[("USER#u1", "PROFILE")]["free_search_used"] is True
 
 
+def _finish(table, search_id, status="completed"):
+    """Mark a search terminal, as the pipeline would. Frees the concurrency lease."""
+    table.store[(f"SEARCH#{search_id}", "META")]["status"] = status
+
+
 def test_second_search_rejected(table) -> None:
     _user(table)
-    searches.create_search("u1", SearchRequest(**VALID))
+    meta = searches.create_search("u1", SearchRequest(**VALID))
+    # Let the first one finish, so it's the *quota* being tested here and not
+    # the concurrency lease, which would reject for a different reason.
+    _finish(table, meta["search_id"])
     with pytest.raises(QuotaExhausted):
         searches.create_search("u1", SearchRequest(**VALID))
+
+
+def test_concurrent_search_rejected_while_first_runs(table) -> None:
+    _user(table)
+    searches.create_search("u1", SearchRequest(**VALID))
+    table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+    with pytest.raises(searches.SearchInProgress):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+
+def test_lease_frees_as_soon_as_the_search_finishes(table) -> None:
+    """The whole point of tracking the search id: no waiting out the clock."""
+    _user(table)
+    meta = searches.create_search("u1", SearchRequest(**VALID))
+    _finish(table, meta["search_id"])
+    table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+    searches.create_search("u1", SearchRequest(**VALID))  # no exception
+
+
+def test_lease_expires_if_the_search_never_finishes(table, monkeypatch) -> None:
+    """A pipeline that dies mid-run must not lock the user out permanently."""
+    from app.settings import settings
+
+    _user(table)
+    searches.create_search("u1", SearchRequest(**VALID))  # stays "pending"
+    table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+
+    with pytest.raises(searches.SearchInProgress):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+    monkeypatch.setattr(settings, "search_lease_minutes", 0)
+    searches.create_search("u1", SearchRequest(**VALID))  # lease aged out
+
+
+def test_monthly_cap_rejects_once_spent(table, monkeypatch) -> None:
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 2)
+    for i in range(2):
+        _user(table, sub=f"u{i}")
+        searches.create_search(f"u{i}", SearchRequest(**VALID))
+
+    _user(table, sub="u9")
+    with pytest.raises(searches.MonthlyCapReached):
+        searches.create_search("u9", SearchRequest(**VALID))
+
+
+def test_monthly_cap_counts_across_users(table, monkeypatch) -> None:
+    """It's a global budget, not a per-user one — one counter item for everyone."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 5)
+    for i in range(3):
+        _user(table, sub=f"u{i}")
+        searches.create_search(f"u{i}", SearchRequest(**VALID))
+
+    month = searches._month_key()
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{month}")]["count"] == 3
+
+
+def test_rejected_search_does_not_eat_the_monthly_slot(table, monkeypatch) -> None:
+    """A user out of personal quota must not burn the shared budget too."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 5)
+    _user(table, used=True)
+    with pytest.raises(QuotaExhausted):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+    month = searches._month_key()
+    counter = table.store.get(("SYSTEM#QUOTA", f"MONTH#{month}"))
+    assert counter is None or counter["count"] == 0
+
+
+def test_rejected_search_releases_the_lease(table, monkeypatch) -> None:
+    """...and doesn't leave them locked out on the way through, either."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 5)
+    _user(table, used=True)
+    with pytest.raises(QuotaExhausted):
+        searches.create_search("u1", SearchRequest(**VALID))
+    assert table.store[("USER#u1", "PROFILE")].get("active_since") == ""
+
+
+def test_monthly_cap_of_zero_is_unlimited(table, monkeypatch) -> None:
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 0)
+    for i in range(4):
+        _user(table, sub=f"u{i}")
+        searches.create_search(f"u{i}", SearchRequest(**VALID))
+
+
+def test_stopping_a_search_frees_the_lease(table) -> None:
+    _user(table)
+    meta = searches.create_search("u1", SearchRequest(**VALID))
+    searches.stop_search("u1", meta["search_id"])
+    assert table.store[("USER#u1", "PROFILE")]["active_since"] == ""
 
 
 def test_get_search_owner_only(table) -> None:
@@ -169,6 +310,7 @@ def test_list_searches_newest_first_and_owner_scoped(table, monkeypatch) -> None
 
     for role, label in [("chef", "Surry Hills"), ("barista", "Newtown")]:
         table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+        table.store[("USER#u1", "PROFILE")]["active_since"] = ""
         searches.create_search(
             "u1",
             SearchRequest(**{**VALID, "roles": [role], "location_label": label}),
@@ -188,6 +330,7 @@ def test_list_searches_respects_limit(table) -> None:
     _user(table)
     for _ in range(3):
         table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+        table.store[("USER#u1", "PROFILE")]["active_since"] = ""
         searches.create_search("u1", SearchRequest(**VALID))
     assert len(searches.list_searches("u1", limit=2)) == 2
 
@@ -213,6 +356,44 @@ def test_get_search_includes_results(table) -> None:
     found = searches.get_search("u1", sid)
     assert found["total"] == 1
     assert found["results"][0]["company"] == "Cafe X"
+
+
+def test_result_carries_pin_coordinates_when_present(table) -> None:
+    """A PIN# item merges lat/lng onto its result so the map can place it."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "RESULT#place1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": "RESULT#place1",
+        "company": "Cafe X",
+        "opportunity_type": "careers_page",
+    }
+    table.store[(f"SEARCH#{sid}", "PIN#place1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": "PIN#place1",
+        "lat": "-33.884",
+        "lng": "151.207",
+    }
+    r = searches.get_search("u1", sid)["results"][0]
+    assert r["lat"] == pytest.approx(-33.884)
+    assert r["lng"] == pytest.approx(151.207)
+
+
+def test_result_without_a_pin_has_null_coordinates(table) -> None:
+    """No PIN# (older/expired search) → null coords, and the pin isn't counted
+    as a result."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "RESULT#place1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": "RESULT#place1",
+        "company": "Cafe X",
+        "opportunity_type": "careers_page",
+    }
+    found = searches.get_search("u1", sid)
+    assert found["total"] == 1  # a PIN# must never be mistaken for a result
+    assert found["results"][0]["lat"] is None
+    assert found["results"][0]["lng"] is None
 
 
 # ---- trace steps, progress and Stop -----------------------------------------

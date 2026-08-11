@@ -32,6 +32,7 @@ TOOL_LABELS: dict[str, str] = {
     "fetch_url": "fetch_page",
     "find_careers_link": "extract_jobs",
     "search_jobs_adzuna": "extract_jobs",
+    "find_seek_company_page": "seek.company",
     "web_search": "web_search",
     "extract_emails": "extract_contact",
     "report_findings": "report",
@@ -103,6 +104,10 @@ def summarise_tool_result(name: str, args: dict, result) -> tuple[Tag, str]:
         n = len(data.get("results") or [])
         query = str(args.get("query", ""))[:48]
         return (Tag.FOUND if n else Tag.CHECKING), f'"{query}"'
+    if name == "find_seek_company_page":
+        return (Tag.FOUND, "employer page") if data.get("url") else (
+            Tag.CHECKING, "no page",
+        )
     if name == "extract_emails":
         n = len(data.get("emails") or [])
         return (Tag.FOUND, f"{n} email{'s' if n != 1 else ''}") if n else (

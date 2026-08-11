@@ -68,6 +68,13 @@ export interface SearchResult {
   evidence: string;
   /** The company's own site — used to tell their careers page from a job board. */
   website: string;
+  /**
+   * Map coordinates for the numbered pin. Optional and nullable: they live on a
+   * TTL'd item, so older or expired searches return null and the card simply
+   * gets no marker on the map.
+   */
+  lat?: number | null;
+  lng?: number | null;
 }
 
 /** One row of the live "What I'm doing" panel. */
@@ -92,6 +99,47 @@ export interface Search {
   total: number;
 }
 
+/**
+ * A failure the API named. `code` is stable and safe to branch on; `message` is
+ * the copy the API wants shown, so wording changes don't need a web deploy.
+ */
+export class ApiError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+/**
+ * Turn any non-OK response into an ApiError.
+ *
+ * Tolerates three shapes on purpose: the structured `{code, message}` envelope,
+ * FastAPI's plain-string `detail` (422 validation errors still use it), and a
+ * body that isn't JSON at all — a gateway timeout or a 502 from in front of the
+ * app never reaches our exception handler, and "Unexpected token < in JSON" is
+ * not something to show a job seeker.
+ */
+async function fail(resp: Response, fallback: string): Promise<never> {
+  const body = await resp.json().catch(() => null);
+  const detail = body?.detail;
+  if (detail && typeof detail === "object" && "code" in detail) {
+    throw new ApiError(
+      String(detail.code),
+      String(detail.message ?? fallback),
+      resp.status,
+    );
+  }
+  throw new ApiError(
+    "unknown",
+    typeof detail === "string" ? detail : `${fallback} (${resp.status})`,
+    resp.status,
+  );
+}
+
 async function authed(path: string, init?: RequestInit): Promise<Response> {
   const token = getToken();
   if (!token) throw new Error("Not signed in");
@@ -105,17 +153,17 @@ async function authed(path: string, init?: RequestInit): Promise<Response> {
   });
 }
 
-/** Start a search. Throws Error with a friendly message on 402 (quota). */
+/**
+ * Start a search. Throws `ApiError` — `quota_exhausted` (402),
+ * `monthly_cap` (429) and `search_in_progress` (409) are all expected answers
+ * here, not bugs, and the caller can tell them apart by `code`.
+ */
 export async function createSearch(params: SearchParams): Promise<string> {
   const resp = await authed("/searches", {
     method: "POST",
     body: JSON.stringify(params),
   });
-  if (resp.status === 402) {
-    const body = await resp.json().catch(() => null);
-    throw new Error(body?.detail ?? "Free search already used");
-  }
-  if (!resp.ok) throw new Error(`Search failed: ${resp.status}`);
+  if (!resp.ok) await fail(resp, "Couldn't start that search");
   const data = await resp.json();
   return data.search_id;
 }
@@ -140,14 +188,14 @@ export async function interpretRoles(
     method: "POST",
     body: JSON.stringify({ text }),
   });
-  if (!resp.ok) throw new Error(`Could not interpret that: ${resp.status}`);
+  if (!resp.ok) await fail(resp, "Couldn't work out what you're looking for");
   return resp.json();
 }
 
 /** Recent searches for the workspace rail. Newest first. */
 export async function listSearches(limit = 10): Promise<SearchSummary[]> {
   const resp = await authed(`/searches?limit=${limit}`);
-  if (!resp.ok) throw new Error(`listSearches failed: ${resp.status}`);
+  if (!resp.ok) await fail(resp, "Couldn't load your recent searches");
   const data = await resp.json();
   return data.searches;
 }
@@ -155,14 +203,11 @@ export async function listSearches(limit = 10): Promise<SearchSummary[]> {
 /** Halt a running search. 409 if it already finished. */
 export async function stopSearch(searchId: string): Promise<void> {
   const resp = await authed(`/searches/${searchId}/stop`, { method: "POST" });
-  if (!resp.ok) {
-    const detail = await resp.json().catch(() => null);
-    throw new Error(detail?.detail ?? `Couldn't stop this search (${resp.status})`);
-  }
+  if (!resp.ok) await fail(resp, "Couldn't stop this search");
 }
 
 export async function getSearch(searchId: string): Promise<Search> {
   const resp = await authed(`/searches/${searchId}`);
-  if (!resp.ok) throw new Error(`getSearch failed: ${resp.status}`);
+  if (!resp.ok) await fail(resp, "Couldn't load that search");
   return resp.json();
 }

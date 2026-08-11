@@ -138,6 +138,65 @@ def search_jobs_adzuna(company: str, role: str, location: str = "australia") -> 
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
 
 
+SEEK_COMPANY_URL = "https://au.seek.com/{slug}-jobs/at-this-company"
+
+# Trailing legal suffixes Seek usually omits from its employer-page slugs.
+_SEEK_SUFFIX_RE = re.compile(
+    r"[\s,]*\b(pty\.?\s*ltd\.?|pty\.?\s*limited|limited|ltd\.?|inc\.?|llc|corp\.?)\s*$",
+    re.I,
+)
+
+
+def _seek_company_slug(company: str) -> str:
+    """Slugify a company name into Seek's employer-page format.
+
+    Seek employer pages look like ``au.seek.com/Virtual-IT-Group-jobs/at-this-company``:
+    words joined by single hyphens, ``&`` spelled "and", trailing legal suffixes
+    (Pty Ltd, Ltd, …) dropped, other punctuation removed. Best-effort only — the URL
+    is always validated to resolve before we trust it, so an imperfect slug just
+    means we fall back rather than surface a wrong link.
+    """
+    s = company.strip().replace("&", " and ")
+    s = _SEEK_SUFFIX_RE.sub("", s).strip()
+    s = re.sub(r"[^0-9A-Za-z\s-]", "", s)      # keep alphanumerics, space, hyphen
+    s = re.sub(r"[\s-]+", "-", s).strip("-")   # runs of space/hyphen -> one hyphen
+    return s
+
+
+def find_seek_company_page(company: str) -> ToolResult:
+    """Find Seek's employer-scoped listings page for a company, if it exists.
+
+    Prefers ``au.seek.com/{slug}-jobs/at-this-company`` — Seek's per-employer
+    listings page — over a blind keyword search, which treats the company name as a
+    search term and surfaces unrelated employers. ToS-safe: this is an existence
+    check ONLY. It follows redirects and inspects the final status and URL; it never
+    reads or extracts page content, and it honours robots.txt. Returns the resolved
+    URL, or ``ok=False`` so the caller falls back to a (weaker) web search.
+    """
+    slug = _seek_company_slug(company)
+    if not slug:
+        return ToolResult(ok=False, reason="could not build a Seek slug")
+    url = SEEK_COMPANY_URL.format(slug=slug)
+    if not _allowed(url):
+        return ToolResult(ok=False, reason="blocked by robots.txt")
+    try:
+        resp = httpx.head(
+            url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT,
+            follow_redirects=True,
+        )
+        if resp.status_code == 405:  # some hosts reject HEAD — retry GET, ignore body
+            resp = _get(url)
+        if resp.is_error:
+            return ToolResult(ok=False, reason=f"http {resp.status_code}")
+        # Seek redirects an unknown employer to a keyword search; if the final URL is
+        # no longer on an /at-this-company path, no employer page exists for this slug.
+        if "at-this-company" not in urlparse(str(resp.url)).path:
+            return ToolResult(ok=False, reason="no employer page (redirected to search)")
+        return ToolResult(ok=True, data={"url": str(resp.url), "company": company})
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+
+
 def web_search(query: str) -> ToolResult:
     """SerpAPI Google search. Used for site:seek.com.au / site:linkedin.com/jobs lookups.
 

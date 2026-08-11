@@ -26,14 +26,43 @@ export default function AddressInput({
   onPlace,
   /** Bias suggestions towards where the map is currently looking. */
   bias,
+  /**
+   * Address pushed in from the map (the reverse-geocoded pin position). Shown
+   * in the field, but deliberately does *not* count as typing — see below.
+   */
+  value,
   placeholder = "Search a suburb or address",
 }: {
   onPlace: (p: LatLng, label: string) => void;
   bias?: LatLng;
+  value?: string;
   placeholder?: string;
 }) {
   const places = useMapsLibrary("places");
-  const [text, setText] = useState("");
+
+  /*
+   * `typed` is what separates a keystroke from an address the map pushed in,
+   * and only a keystroke may trigger an autocomplete request.
+   *
+   * Without that flag this is a loop: pin moves → we write the address into the
+   * field → the field fetches suggestions → picking one re-centres the map that
+   * produced the address in the first place. It would also bill a session token
+   * per pin drag. The flag is the whole reason this isn't a plain controlled
+   * input.
+   */
+  const [entry, setEntry] = useState<{ text: string; typed: boolean }>({
+    text: value ?? "",
+    typed: false,
+  });
+  // Adjusting state during render, per the React docs' "derived from props"
+  // pattern — cheaper than an effect, and avoids a frame showing the old value.
+  const lastPushed = useRef(value);
+  if (value !== undefined && value !== lastPushed.current) {
+    lastPushed.current = value;
+    setEntry({ text: value, typed: false });
+  }
+  const text = entry.text;
+
   const [items, setItems] = useState<Suggestion[]>([]);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
@@ -55,11 +84,20 @@ export default function AddressInput({
   // Debounced fetch. Every request is stamped so a slow earlier response can't
   // overwrite the results for what the user has since typed.
   useEffect(() => {
-    if (!places || text.trim().length < 3) {
+    // An address the map pushed in is already resolved — nothing to look up,
+    // and the dropdown must not spring open underneath it.
+    if (!entry.typed) {
+      setItems([]);
+      setOpen(false);
+      predictionsRef.current = [];
+      return;
+    }
+    if (!places || entry.text.trim().length < 3) {
       setItems([]);
       predictionsRef.current = [];
       return;
     }
+    const text = entry.text;
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
@@ -98,7 +136,7 @@ export default function AddressInput({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [places, text, bias]);
+  }, [places, entry, bias]);
 
   // Close when focus or a click leaves the combobox.
   useEffect(() => {
@@ -118,7 +156,10 @@ export default function AddressInput({
     await place.fetchFields({ fields: ["location", "formattedAddress"] });
     const loc = place.location;
     const label = place.formattedAddress ?? items[i]?.main ?? "";
-    setText(label);
+    // Claim the value we're about to send up, so the parent echoing it back as
+    // `value` doesn't read as a fresh push and reset `entry` again.
+    lastPushed.current = label;
+    setEntry({ text: label, typed: false });
     if (loc) onPlace({ lat: loc.lat(), lng: loc.lng() }, label);
 
     // Selecting a place ends the billable session; the next keystroke starts a
@@ -180,7 +221,7 @@ export default function AddressInput({
           }
           value={text}
           placeholder={placeholder}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => setEntry({ text: e.target.value, typed: true })}
           onFocus={() => items.length > 0 && setOpen(true)}
           onKeyDown={onKeyDown}
           /* No focus ring on the field itself — the bar around it is the

@@ -10,8 +10,10 @@ logger = logging.getLogger("fmaj")
 
 from app.auth import AuthUser, require_user
 from app.searches import (
+    MonthlyCapReached,
     NotStoppable,
     QuotaExhausted,
+    SearchInProgress,
     SearchRequest,
     create_search,
     get_search,
@@ -22,6 +24,19 @@ from app.settings import settings
 from app.users import ensure_user
 
 app = FastAPI(title="Find-Me-A-Job AI API", version="0.1.0")
+
+
+def api_error(status: int, code: str, message: str) -> HTTPException:
+    """A failure the frontend can branch on without parsing prose.
+
+    `message` is shown to the user as-is; `code` is the stable name. The two are
+    separate so copy can be reworded without breaking a client that keys off it —
+    and so the client can decide, say, that a monthly cap deserves a different
+    treatment from a spent personal quota, which reads identically otherwise.
+    """
+    return HTTPException(
+        status_code=status, detail={"code": code, "message": message}
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,7 +55,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     an opaque 'Failed to fetch' instead of the real error.
     """
     logger.exception("Unhandled error on %s %s: %s", request.method, request.url.path, exc)
-    return JSONResponse(status_code=500, content={"detail": f"Internal error: {type(exc).__name__}"})
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "internal_error",
+                # The exception type, not its message: the type is enough to
+                # find the log line, and messages can carry table names, ARNs or
+                # user data we don't want in a browser.
+                "message": f"Something went wrong on our side ({type(exc).__name__}).",
+            }
+        },
+    )
 
 
 @app.get("/health")
@@ -96,10 +122,26 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
 def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> dict:
     try:
         meta = create_search(user.sub, req)
+    except SearchInProgress:
+        # 409, not 429: nothing is being rate-limited, they simply already have
+        # one running and the honest fix is to wait for it or stop it.
+        raise api_error(
+            409,
+            "search_in_progress",
+            "You already have a search running. Wait for it to finish, or stop it first.",
+        ) from None
+    except MonthlyCapReached:
+        raise api_error(
+            429,
+            "monthly_cap",
+            "We've hit this month's search limit while the app is in preview. "
+            "Please try again next month.",
+        ) from None
     except QuotaExhausted:
-        raise HTTPException(
-            status_code=402,
-            detail="Your free search has been used. Subscriptions are coming soon!",
+        raise api_error(
+            402,
+            "quota_exhausted",
+            "Your free search has been used. Subscriptions are coming soon!",
         ) from None
     return {"search_id": meta["search_id"], "status": meta["status"]}
 
@@ -121,7 +163,7 @@ def list_searches_route(
 def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
     found = get_search(user.sub, search_id)
     if found is None:
-        raise HTTPException(status_code=404, detail="Search not found")
+        raise api_error(404, "not_found", "We couldn't find that search.")
     return found
 
 
@@ -131,11 +173,11 @@ def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) ->
     try:
         stopped = stop_search(user.sub, search_id)
     except NotStoppable as exc:
-        raise HTTPException(
-            status_code=409, detail=f"This search is already {exc}."
+        raise api_error(
+            409, "not_stoppable", f"This search is already {exc}."
         ) from None
     if stopped is None:
-        raise HTTPException(status_code=404, detail="Search not found")
+        raise api_error(404, "not_found", "We couldn't find that search.")
     return stopped
 
 

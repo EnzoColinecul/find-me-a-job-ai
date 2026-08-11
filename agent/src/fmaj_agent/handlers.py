@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import boto3
 
 from fmaj_agent import config
+from fmaj_agent.budget import DynamoSearchBudget
 from fmaj_agent.discovery import discover
 from fmaj_agent.models import Company
 from fmaj_agent.orchestrator import investigate
@@ -29,6 +30,14 @@ AWS_REGION = os.environ.get("FMAJ_AWS_REGION", "ap-southeast-2")
 #: enough to debug a run and short enough that we're not sitting on Places data.
 #: Requires TTL enabled on `expires_at` for the table (see infra/data_stack).
 STEP_TTL_SECONDS = 7 * 24 * 3600
+
+#: Map-pin coordinates are the one piece of Places data we now persist beyond the
+#: search, so they live on their own PIN# item with a TTL rather than on the
+#: durable RESULT# row. CLAUDE.md: "don't persist place data beyond the search
+#: (place_id is exempt)" — keying by the exempt place_id and expiring the lat/lng
+#: keeps the coordinates from outliving the search, while the result cards (which
+#: the user came back for) are left untouched. 7 days matches the trace rows.
+PIN_TTL_SECONDS = 7 * 24 * 3600
 
 _table = None
 
@@ -104,6 +113,18 @@ def discover_handler(event: dict, _context=None) -> dict:
             "links": [],
             "emails": [],
         })
+        # Coordinates go on a separate, expiring PIN# item — see PIN_TTL_SECONDS.
+        # Stored as strings to match the META lat/lng and avoid DynamoDB's
+        # float/Decimal handling; get_search parses them back. A company with no
+        # coordinates simply gets no pin.
+        if company.lat is not None and company.lng is not None:
+            table.put_item(Item={
+                "PK": f"SEARCH#{search_id}",
+                "SK": f"PIN#{company.place_id}",
+                "lat": str(company.lat),
+                "lng": str(company.lng),
+                "expires_at": int(time.time()) + PIN_TTL_SECONDS,
+            })
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET company_count = :c, discovery_stats = :st",
@@ -133,7 +154,15 @@ def investigate_handler(event: dict, _context=None) -> dict:
     company = Company(**event["company"])
     # Steps are written as they happen, so the panel fills in while the Map
     # state is still running rather than all at once at the end.
-    run = investigate(company, on_step=lambda s: _put_step(search_id, s))
+    #
+    # The budget is what lets MAX_COMPANIES be a product decision again: every
+    # Lambda under this search spends against one counter, so raising the number
+    # of companies no longer multiplies the SerpAPI bill.
+    run = investigate(
+        company,
+        on_step=lambda s: _put_step(search_id, s),
+        budget=DynamoSearchBudget(search_id, table=_get_table()),
+    )
     f = run.findings
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},

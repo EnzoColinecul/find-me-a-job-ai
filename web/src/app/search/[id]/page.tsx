@@ -6,7 +6,10 @@ import { use, useEffect, useState } from "react";
 import { getMe, getSearch, stopSearch, type Me, type Search } from "@/lib/api";
 import WorkspaceShell from "@/components/workspace/WorkspaceShell";
 import { MapBar, SearchGlyph, StatusPill } from "@/components/workspace/MapBar";
-import ResultsPanel, { foundResults } from "@/components/results/ResultsPanel";
+import ResultsPanel, {
+  foundResults,
+  orderedResults,
+} from "@/components/results/ResultsPanel";
 import TracePanel from "@/components/results/TracePanel";
 import LiveStatusCard, {
   MapActivityPing,
@@ -45,6 +48,8 @@ export default function SearchPage({
   const [showTrace, setShowTrace] = useState(true);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  /** place_id of the result card being hovered/focused, to highlight its pin. */
+  const [hoveredPin, setHoveredPin] = useState<string | null>(null);
 
   useEffect(() => {
     getMe()
@@ -104,6 +109,21 @@ export default function SearchPage({
     search.params.location_label ||
     `${search.params.lat.toFixed(3)}, ${search.params.lng.toFixed(3)}`;
 
+  // Refine reopens the workspace with this search's parameters prefilled, so the
+  // user tweaks the last search rather than starting from a blank map. The role
+  // labels, centre, radius and place name are all we have (and all we need); the
+  // workspace re-derives curated keys from the labels.
+  const refineHref = (() => {
+    const q = new URLSearchParams();
+    search.params.roles.forEach((r) => q.append("role", r));
+    q.set("lat", String(search.params.lat));
+    q.set("lng", String(search.params.lng));
+    q.set("radius", String(search.params.radius_km));
+    if (search.params.location_label)
+      q.set("loc", search.params.location_label);
+    return `/?${q.toString()}`;
+  })();
+
   // Defaulted, not assumed: an API that predates the trace work (or a stale
   // local uvicorn) doesn't send `steps`, and reading .length off undefined would
   // blank the whole page. (`progress` is read by LiveStatusCard, defended there.)
@@ -145,34 +165,95 @@ export default function SearchPage({
     }
   };
 
+  // The trace⇄results switch. One node, rendered in the shell's column bar on
+  // desktop and inside the panel header on mobile (where the bar is hidden), so
+  // it never sits in a near-empty strip of its own.
+  //
+  // The two directions aren't equal: getting *to the results* is the thing a
+  // user must never miss, so that direction is a solid accent button with a
+  // chevron — an obvious tap target — while the way back to the working is a
+  // quiet text link. A muted "Results (9)" read as a stat, not a button.
+  const viewSwitch =
+    hasResults && steps.length > 0 ? (
+      showingTrace ? (
+        <button
+          type="button"
+          onClick={() => setShowTrace(false)}
+          className="inline-flex min-h-11 flex-none items-center gap-1 rounded-pill bg-accent-strong pr-2.5 pl-3.5 text-[12px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+        >
+          See results ({found.length})
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            className="flex-none"
+          >
+            <path
+              d="M9 6l6 6-6 6"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setShowTrace(true)}
+          className="inline-flex min-h-11 flex-none items-center rounded-pill px-2.5 text-[11px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+        >
+          See what I did
+        </button>
+      )
+    ) : null;
+
   const panel = showingTrace ? (
-    <TracePanel search={search} />
+    <TracePanel search={search} headerAccessory={viewSwitch} />
   ) : hasResults ? (
-    <ResultsPanel search={search} />
+    <ResultsPanel
+      search={search}
+      onHover={setHoveredPin}
+      headerAccessory={viewSwitch}
+    />
   ) : undefined;
+
+  // Numbered pins for the results, in the same order the cards are numbered.
+  // Results without coordinates (older/expired searches, or a pre-pin backend)
+  // are skipped — the map simply doesn't place them, cards are unaffected.
+  const markers = orderedResults(search).flatMap((r, i) =>
+    typeof r.lat === "number" && typeof r.lng === "number"
+      ? [
+          {
+            id: r.place_id,
+            position: { lat: r.lat, lng: r.lng },
+            index: i + 1,
+            featured: i === 0,
+          },
+        ]
+      : [],
+  );
 
   return (
     <WorkspaceShell
       me={me}
       center={{ lat: search.params.lat, lng: search.params.lng }}
       radiusKm={search.params.radius_km}
+      markers={markers}
+      highlightedMarkerId={hoveredPin}
       onNewSearch={() => router.push("/")}
+      /* Same wording as `/`, so the rail doesn't offer here what it refuses
+         one screen over. */
+      newSearchDisabledReason={
+        me.free_search_used
+          ? "You've used your free search. Your past results are still here in the rail."
+          : null
+      }
       rightPanelTitle={showingTrace ? "What I'm doing" : "Results"}
       rightPanel={panel}
-      rightPanelSwitch={
-        // Only offer the swap when both views have something in them.
-        hasResults && steps.length > 0 ? (
-          <button
-            type="button"
-            onClick={() => setShowTrace((v) => !v)}
-            className="inline-flex min-h-11 items-center rounded-pill px-2.5 text-[11px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
-          >
-            {showingTrace
-              ? `Results (${found.length})`
-              : "See what I did"}
-          </button>
-        ) : undefined
-      }
+      rightPanelSwitch={viewSwitch}
       topBar={
         <MapBar>
           <SearchGlyph />
@@ -191,7 +272,7 @@ export default function SearchPage({
             </button>
           ) : (
             <Link
-              href="/"
+              href={refineHref}
               className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
             >
               Refine

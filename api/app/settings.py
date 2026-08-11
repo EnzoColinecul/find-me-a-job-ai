@@ -37,6 +37,19 @@ class Settings(BaseSettings):
     max_roles: int = 1
     max_radius_km: float = 10.0
 
+    # Ceiling across ALL users for a calendar month. This is the blast-radius
+    # control: the free-search quota stops one person running up a bill, this
+    # stops a hundred people doing it one search each. Sized against the real
+    # binding constraint — Places Enterprise Details, 1K calls/month free, which
+    # is ~25-33 searches (see "Cost discipline" in CLAUDE.md). 0 = unlimited.
+    global_monthly_searches: int = 30
+
+    # One search at a time per user. Held as a lease rather than a flag that
+    # something else has to clear: a crashed pipeline would otherwise lock the
+    # user out permanently, and there is no process that reliably unsets it.
+    # Generous next to a real search (minutes), short next to a stuck one.
+    search_lease_minutes: int = 15
+
     model_config = {"env_prefix": "FMAJ_", "env_file": ".env", "extra": "ignore"}
 
 

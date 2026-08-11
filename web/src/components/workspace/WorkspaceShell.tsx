@@ -1,12 +1,39 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { APIProvider, AdvancedMarker, Map } from "@vis.gl/react-google-maps";
 import { listSearches, type Me, type SearchSummary } from "@/lib/api";
+import { APIProvider, AdvancedMarker, Map } from "@vis.gl/react-google-maps";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
+import { useEffect, useState } from "react";
 import { RadiusCircle, type LatLng } from "../map/MapPieces";
 import Rail from "./Rail";
 
 const MAPS_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY!;
+
+/**
+ * The numbered badge dropped on the map for each result. All pins use
+ * `--accent-strong` (blue), matching the card numbers. Hovering a card enlarges
+ * its pin and rings it so the eye can find it.
+ */
+function NumberedPin({
+  index,
+  highlighted,
+}: {
+  index: number;
+  highlighted: boolean;
+}) {
+  return (
+    <span
+      className={[
+        "flex items-center justify-center rounded-full text-[12px] font-bold text-white",
+        "border-2 border-white shadow-pin transition-transform duration-150",
+        "bg-accent-strong",
+        highlighted ? "h-8 w-8 scale-110 ring-2 ring-accent-strong" : "h-6 w-6",
+      ].join(" ")}
+    >
+      {index}
+    </span>
+  );
+}
 
 /**
  * The chrome shared by mockups 3 and 4: rail on the left, map filling the
@@ -22,6 +49,8 @@ export default function WorkspaceShell({
   radiusKm,
   onCenterChange,
   draggablePin = false,
+  markers,
+  highlightedMarkerId,
   topBar,
   mapOverlay,
   floatingPanel,
@@ -29,7 +58,10 @@ export default function WorkspaceShell({
   rightPanel,
   rightPanelTitle,
   rightPanelSwitch,
+  recent: recentProp,
+  loadingRecent: loadingRecentProp,
   onNewSearch,
+  newSearchDisabledReason,
 }: {
   me: Me;
   center: LatLng;
@@ -37,6 +69,18 @@ export default function WorkspaceShell({
   onCenterChange?: (p: LatLng) => void;
   /** Only the workspace lets you move the pin; results are a fixed record. */
   draggablePin?: boolean;
+  /**
+   * Numbered result pins (mockup 4). Numbers must match the result cards, so the
+   * caller derives both from the same ordered list. Empty/undefined → no pins.
+   */
+  markers?: Array<{
+    id: string;
+    position: LatLng;
+    index: number;
+    featured: boolean;
+  }>;
+  /** The pin whose card is currently hovered/focused, enlarged to match. */
+  highlightedMarkerId?: string | null;
   /** Floats at the top of the map — address input, or the search summary. */
   topBar: React.ReactNode;
   /** Anything else over the map, e.g. the results status pill. */
@@ -50,18 +94,32 @@ export default function WorkspaceShell({
   rightPanelTitle?: string;
   /** Optional control in the column header, e.g. switching trace ⇄ results. */
   rightPanelSwitch?: React.ReactNode;
+  /**
+   * Recent searches, when the caller already has them. `/` needs the list
+   * before it renders (to decide first visit vs returning) so it fetches and
+   * passes them down; `/search/[id]` doesn't, and lets the shell fetch.
+   */
+  recent?: SearchSummary[];
+  loadingRecent?: boolean;
   onNewSearch: () => void;
+  /** When set, "New search" is disabled and this explains why. */
+  newSearchDisabledReason?: string | null;
 }) {
-  const [recent, setRecent] = useState<SearchSummary[]>([]);
-  const [loadingRecent, setLoadingRecent] = useState(true);
+  const provided = recentProp !== undefined;
+  const [ownRecent, setOwnRecent] = useState<SearchSummary[]>([]);
+  const [ownLoading, setOwnLoading] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
 
   useEffect(() => {
+    if (provided) return;
     listSearches()
-      .then(setRecent)
-      .catch(() => setRecent([]))
-      .finally(() => setLoadingRecent(false));
-  }, []);
+      .then(setOwnRecent)
+      .catch(() => setOwnRecent([]))
+      .finally(() => setOwnLoading(false));
+  }, [provided]);
+
+  const recent = recentProp ?? ownRecent;
+  const loadingRecent = provided ? (loadingRecentProp ?? false) : ownLoading;
 
   // Nothing to show → no column, no toggle, no empty gutter.
   const hasRight = Boolean(rightPanel);
@@ -75,6 +133,7 @@ export default function WorkspaceShell({
             recent={recent}
             loadingRecent={loadingRecent}
             onNewSearch={onNewSearch}
+            newSearchDisabledReason={newSearchDisabledReason}
           />
         </aside>
 
@@ -85,7 +144,9 @@ export default function WorkspaceShell({
             center={center}
             mapId="fmaj-search"
             className="h-full w-full"
-            onClick={(e) => e.detail.latLng && onCenterChange?.(e.detail.latLng)}
+            onClick={(e) =>
+              e.detail.latLng && onCenterChange?.(e.detail.latLng)
+            }
             /*
              * The map should read as our surface, not as an embedded Google
              * widget: no zoom buttons, no Street View pegman, no camera puck,
@@ -119,9 +180,28 @@ export default function WorkspaceShell({
               }
             />
             <RadiusCircle center={center} radiusKm={radiusKm} />
+
+            {/* Numbered result pins (mockup 4). zIndex lifts the highlighted one
+                and the featured #1 above the rest so they can't be hidden. */}
+            {markers?.map((m) => (
+              <AdvancedMarker
+                key={m.id}
+                position={m.position}
+                zIndex={
+                  highlightedMarkerId === m.id ? 30 : m.featured ? 20 : 10
+                }
+              >
+                <NumberedPin
+                  index={m.index}
+                  highlighted={highlightedMarkerId === m.id}
+                />
+              </AdvancedMarker>
+            ))}
           </Map>
 
-          <div className="absolute top-4 right-4 left-4 sm:right-5 sm:left-5">
+          {/* On lg the sidebar toggle floats at the map's top-right corner, so
+              pull the search bar's right edge in to leave it clear room. */}
+          <div className="absolute top-2 right-4 left-4 sm:right-5 sm:left-5 lg:right-16">
             {topBar}
           </div>
 
@@ -145,10 +225,17 @@ export default function WorkspaceShell({
           <section
             aria-label={rightPanelTitle ?? "Results"}
             className={[
-              "order-2 flex flex-col border-rail-line bg-surface-plain",
-              "border-t lg:order-none lg:border-t-0 lg:border-l",
-              rightOpen ? "lg:w-[330px]" : "lg:w-[44px]",
-              "lg:flex-none lg:overflow-hidden lg:transition-[width] lg:duration-200",
+              // Mobile: a normal stacked block with the panel surface.
+              "order-2 flex flex-col border-t border-rail-line bg-surface-plain",
+              "lg:relative lg:order-none lg:border-t-0",
+              // Desktop open: a 330px surface with a left divider.
+              // Desktop collapsed: width + surface fully gone, so only the
+              // floating toggle (positioned against this column's right edge)
+              // is left over the map — no empty white strip.
+              rightOpen
+                ? "lg:w-[330px] lg:border-l lg:bg-surface-plain"
+                : "lg:w-0 lg:border-l-0 lg:bg-transparent",
+              "lg:flex-none lg:transition-[width] lg:duration-200",
             ].join(" ")}
           >
             {/*
@@ -160,41 +247,56 @@ export default function WorkspaceShell({
              * row itself (and the switch inside it) stays visible at every
              * width; only the collapse button is lg-only.
              */}
-            <div className="flex min-h-11 flex-none items-center gap-1 border-b border-rail-line px-2 py-1.5">
-              <button
-                type="button"
-                onClick={() => setRightOpen((v) => !v)}
-                aria-expanded={rightOpen}
-                aria-label={
-                  rightOpen ? "Hide this panel" : "Show this panel"
-                }
-                className="hidden flex-none items-center gap-1.5 rounded-card px-1.5 py-1 hover:bg-rail focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong lg:flex"
+            <div
+              className={[
+                "hidden min-h-11 flex-none items-center gap-1 px-2 py-1.5 lg:flex",
+                rightOpen ? "border-b border-rail-line" : "",
+              ].join(" ")}
+            >
+              <div
+                className={[
+                  "group/toggle hidden flex-none lg:block",
+                  // Open: sits inline in the panel header.
+                  // Collapsed: floats against the column's right edge, over the
+                  // map's top-right corner (the column itself is now 0-width).
+                  rightOpen
+                    ? "relative"
+                    : "lg:absolute lg:top-2 lg:right-3 lg:z-30",
+                ].join(" ")}
               >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
+                <button
+                  type="button"
+                  onClick={() => setRightOpen((v) => !v)}
+                  aria-expanded={rightOpen}
+                  aria-label={rightOpen ? "Close sidebar" : "Open sidebar"}
                   className={[
-                    "flex-none text-slate-faint transition-transform duration-200",
-                    rightOpen ? "" : "rotate-180",
+                    "flex h-8 w-8 items-center justify-center rounded-card transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong",
+                    rightOpen
+                      ? "text-slate-muted hover:bg-rail hover:text-ink"
+                      : "border border-line-cool bg-surface-plain text-slate-muted shadow-float hover:text-ink",
                   ].join(" ")}
                 >
-                  <path
-                    d="M9 6l6 6-6 6"
-                    stroke="currentColor"
-                    strokeWidth="2.2"
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                {rightOpen && (
-                  <span className="text-[11px] font-semibold text-slate-muted">
-                    Hide
-                  </span>
-                )}
-              </button>
+                  {rightOpen ? (
+                    <PanelRightClose
+                      aria-hidden="true"
+                      strokeWidth={2}
+                      className="h-[18px] w-[18px] flex-none"
+                    />
+                  ) : (
+                    <PanelRightOpen
+                      aria-hidden="true"
+                      strokeWidth={2}
+                      className="h-[18px] w-[18px] flex-none"
+                    />
+                  )}
+                </button>
+                <span
+                  role="tooltip"
+                  className="pointer-events-none absolute top-1/2 right-full mr-2 -translate-y-1/2 z-30 whitespace-nowrap rounded-card bg-ink px-2.5 py-1.5 text-[12px] font-medium text-white opacity-0 shadow-float transition-opacity duration-150 group-hover/toggle:opacity-100"
+                >
+                  {rightOpen ? "Close sidebar" : "Open sidebar"}
+                </span>
+              </div>
               {rightPanelSwitch && (
                 <div
                   className={[
@@ -209,7 +311,7 @@ export default function WorkspaceShell({
 
             <div
               className={[
-                "min-h-0 flex-1 overflow-y-auto",
+                "min-h-0 flex-1 overflow-y-auto lg:overflow-x-hidden",
                 rightOpen ? "" : "lg:hidden",
               ].join(" ")}
             >

@@ -15,7 +15,7 @@ and the rail links straight through to the search page, which polls it live.
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -95,7 +95,15 @@ class SearchRequest(BaseModel):
 
 
 class QuotaExhausted(Exception):
-    pass
+    """This user's free search is gone."""
+
+
+class MonthlyCapReached(Exception):
+    """The whole PoC has run its budgeted number of searches for the month."""
+
+
+class SearchInProgress(Exception):
+    """This user already has a search running."""
 
 
 logger = logging.getLogger(__name__)
@@ -139,11 +147,163 @@ def _consume_free_search(sub: str) -> None:
         raise
 
 
-def create_search(sub: str, req: SearchRequest) -> dict:
-    """Consume quota, persist the search, kick the pipeline. Returns the META item."""
-    _consume_free_search(sub)
+def _month_key(when: datetime | None = None) -> str:
+    return (when or datetime.now(timezone.utc)).strftime("%Y-%m")
 
+
+def _reserve_monthly_slot() -> str | None:
+    """Take one of this month's searches, or raise MonthlyCapReached.
+
+    A single counter item incremented conditionally, so the check and the
+    increment are one operation — reading the count and then writing it would
+    let two concurrent requests both see 29 and both proceed.
+
+    Returns the month key so the caller can hand the slot back if a later step
+    fails. None when the cap is switched off.
+    """
+    cap = settings.global_monthly_searches
+    if cap <= 0:
+        return None
+    month = _month_key()
+    try:
+        _get_table().update_item(
+            Key={"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"},
+            UpdateExpression="ADD #c :one",
+            ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
+            ExpressionAttributeNames={"#c": "count"},
+            ExpressionAttributeValues={":one": 1, ":cap": cap},
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise MonthlyCapReached from exc
+        raise
+    return month
+
+
+def _release_monthly_slot(month: str | None) -> None:
+    """Hand a reserved slot back after a later step failed."""
+    if month is None:
+        return
+    try:
+        _get_table().update_item(
+            Key={"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"},
+            UpdateExpression="ADD #c :minus",
+            ConditionExpression="#c > :zero",
+            ExpressionAttributeNames={"#c": "count"},
+            ExpressionAttributeValues={":minus": -1, ":zero": 0},
+        )
+    except ClientError as exc:
+        # Losing a slot is a rounding error against the month's budget; failing
+        # the user's request to report it would not be.
+        logger.warning("could not release monthly slot for %s: %s", month, exc)
+
+
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _search_is_finished(search_id: str) -> bool:
+    """True if the named search is over — or gone, which amounts to the same."""
+    if not search_id:
+        return True
+    item = _get_table().get_item(
+        Key={"PK": f"SEARCH#{search_id}", "SK": "META"}
+    ).get("Item")
+    if item is None:
+        return True
+    return item.get("status") in TERMINAL_STATUSES
+
+
+def _acquire_search_lease(sub: str, search_id: str) -> None:
+    """Claim this user's one concurrent search slot, or raise SearchInProgress.
+
+    Two independent ways the slot frees up, because relying on either alone is
+    broken:
+
+    - **The named search reached a terminal status.** This is the normal path
+      and it's immediate. A pure time lease would make someone wait out the
+      clock after their search had visibly finished, which is indefensible.
+    - **The lease aged out.** The backstop for a search that never reaches a
+      terminal status at all — a crashed Lambda, an undeployed pipeline. Without
+      it a user could be locked out permanently by a bug, with nothing in the
+      product able to release them.
+
+    Deliberately *not* a flag some other process clears: the only candidate for
+    that job is the pipeline, and the pipeline failing is exactly the case the
+    guard has to survive.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=settings.search_lease_minutes)).isoformat()
+
+    profile = _get_table().get_item(
+        Key={"PK": f"USER#{sub}", "SK": "PROFILE"}
+    ).get("Item") or {}
+    held_since = profile.get("active_since") or ""
+    held_id = profile.get("active_search_id") or ""
+
+    # ISO-8601 UTC strings sort lexicographically, so this is a real comparison.
+    if held_since >= cutoff and not _search_is_finished(held_id):
+        raise SearchInProgress
+
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
+            UpdateExpression="SET active_since = :now, active_search_id = :sid",
+            # Compare-and-swap against what we just read. Two requests that both
+            # decide the old lease is dead can't both take it — the second one's
+            # condition no longer matches and it gets SearchInProgress, which is
+            # the truth by then.
+            ConditionExpression=(
+                "attribute_exists(PK) AND ("
+                "attribute_not_exists(active_since) OR active_since = :expected)"
+            ),
+            ExpressionAttributeValues={
+                ":now": now.isoformat(),
+                ":sid": search_id,
+                ":expected": held_since,
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise SearchInProgress from exc
+        raise
+
+
+def _release_search_lease(sub: str) -> None:
+    """Free the concurrency slot early, rather than waiting for the lease out."""
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
+            UpdateExpression="SET active_since = :none, active_search_id = :none",
+            ExpressionAttributeValues={":none": ""},
+        )
+    except ClientError as exc:
+        logger.warning("could not release search lease for %s: %s", sub, exc)
+
+
+def create_search(sub: str, req: SearchRequest) -> dict:
+    """Consume quota, persist the search, kick the pipeline. Returns the META item.
+
+    Three gates, cheapest and most-reversible first, so a rejection never eats
+    something the user can't get back:
+      1. concurrency lease — catches the double-clicked button
+      2. this month's global cap — protects the free tiers
+      3. this user's free search — the only irreversible one
+    """
     search_id = uuid.uuid4().hex[:12]
+
+    _acquire_search_lease(sub, search_id)
+    try:
+        month = _reserve_monthly_slot()
+    except Exception:
+        _release_search_lease(sub)
+        raise
+    try:
+        _consume_free_search(sub)
+    except Exception:
+        _release_monthly_slot(month)
+        _release_search_lease(sub)
+        raise
+
     now = datetime.now(timezone.utc).isoformat()
     meta = {
         "PK": f"SEARCH#{search_id}",
@@ -273,6 +433,9 @@ def stop_search(sub: str, search_id: str) -> dict | None:
             ":t": datetime.now(timezone.utc).isoformat(),
         },
     )
+    # Stopping is the user telling us they're done with this one; making them
+    # wait out the lease before they can start another would be perverse.
+    _release_search_lease(sub)
     return {"search_id": search_id, "status": "cancelled"}
 
 
@@ -288,6 +451,16 @@ def get_search(sub: str, search_id: str) -> dict | None:
         return None
     results = [i for i in items if i["SK"].startswith("RESULT#")]
 
+    # PIN# items carry the map coordinates for each result. They're a separate,
+    # TTL'd item (Places data must not outlive the search), so they may be absent
+    # for older searches or after they expire — a result without a pin just isn't
+    # placed on the map.
+    pins = {
+        i["SK"].removeprefix("PIN#"): i
+        for i in items
+        if i["SK"].startswith("PIN#")
+    }
+
     # Trace rows for the live "What I'm doing" panel. The SK embeds an ISO
     # timestamp, so sorting by it is chronological.
     steps = sorted(
@@ -300,6 +473,35 @@ def get_search(sub: str, search_id: str) -> dict | None:
     # denominator, so report 0 rather than guessing from partial results.
     total_companies = int(meta.get("company_count", 0) or 0)
     done = sum(1 for r in results if r.get("opportunity_type", "pending") != "pending")
+
+    def _coords(place_id: str) -> tuple[float | None, float | None]:
+        """Parse a result's stored pin coordinates, or (None, None) if absent."""
+        pin = pins.get(place_id)
+        if not pin:
+            return None, None
+        try:
+            return float(pin["lat"]), float(pin["lng"])
+        except (KeyError, TypeError, ValueError):
+            return None, None
+
+    def _result(r: dict) -> dict:
+        place_id = r["SK"].removeprefix("RESULT#")
+        lat, lng = _coords(place_id)
+        return {
+            "place_id": place_id,
+            "company": r.get("company", ""),
+            "address": r.get("address", ""),
+            "opportunity_type": r.get("opportunity_type", "pending"),
+            "links": list(r.get("links", [])),
+            "emails": list(r.get("emails", [])),
+            # The agent's one-line justification. Stored by the pipeline since
+            # Phase 3; the results page now shows it.
+            "evidence": r.get("evidence", ""),
+            "website": r.get("website", ""),
+            # Coordinates for the numbered map pin, when we still have them.
+            "lat": lat,
+            "lng": lng,
+        }
 
     return {
         "search_id": search_id,
@@ -326,20 +528,6 @@ def get_search(sub: str, search_id: str) -> dict | None:
             "location_label": meta.get("location_label", ""),
         },
         "created_at": meta["created_at"],
-        "results": [
-            {
-                "place_id": r["SK"].removeprefix("RESULT#"),
-                "company": r.get("company", ""),
-                "address": r.get("address", ""),
-                "opportunity_type": r.get("opportunity_type", "pending"),
-                "links": list(r.get("links", [])),
-                "emails": list(r.get("emails", [])),
-                # The agent's one-line justification. Stored by the pipeline
-                # since Phase 3; the results page now shows it.
-                "evidence": r.get("evidence", ""),
-                "website": r.get("website", ""),
-            }
-            for r in results
-        ],
+        "results": [_result(r) for r in results],
         "total": len(results),
     }

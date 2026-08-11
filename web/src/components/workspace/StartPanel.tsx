@@ -2,6 +2,7 @@
 
 import type { AppConfig, RoleSuggestion } from "@/lib/api";
 import { CURATED_ROLES } from "@/lib/roles";
+import { useEffect, useRef } from "react";
 import { cx } from "../ui/cx";
 
 function PanelLabel({ children }: { children: React.ReactNode }) {
@@ -57,6 +58,7 @@ export default function StartPanel({
   radiusOptions,
   submitting,
   error,
+  focusRadiusSignal,
   onToggleRole,
   onAddRole,
   onRadius,
@@ -69,6 +71,12 @@ export default function StartPanel({
   radiusOptions: number[];
   submitting: boolean;
   error: string | null;
+  /**
+   * Changes when geolocation has just set the centre. Picking a location was
+   * the user's whole reason for that tap, so the next decision — how far to
+   * look — is where focus belongs.
+   */
+  focusRadiusSignal?: number;
   onToggleRole: (label: string) => void;
   onAddRole: (label: string) => void;
   onRadius: (km: number) => void;
@@ -78,6 +86,20 @@ export default function StartPanel({
   const unpicked = CURATED_ROLES.filter(
     (r) => !suggestions.some((s) => s.label === r),
   );
+  // No roles yet: the panel sits behind the ask overlay, or the user dismissed
+  // it without saying what they want. "I found 0 roles" would be a lie about
+  // work we never did.
+  const idle = suggestions.length === 0;
+
+  const radiusRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!focusRadiusSignal) return;
+    // The panel renders twice (floating >=lg, stacked below); focus() on the
+    // hidden copy is a no-op, so whichever one is visible wins.
+    radiusRef.current
+      ?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')
+      ?.focus();
+  }, [focusRadiusSignal]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -86,14 +108,16 @@ export default function StartPanel({
           Ready when you are
         </h2>
         <p className="mt-[3px] mb-0 text-[12.5px] leading-normal text-slate-muted">
-          {suggestions.length === 1
-            ? "I found 1 role that matches what you told me."
-            : `I found ${suggestions.length} roles that match what you told me.`}
+          {idle
+            ? "Tell me what kind of work you're after and the roles will show up here."
+            : suggestions.length === 1
+              ? "I found 1 role that matches what you told me."
+              : `I found ${suggestions.length} roles that match what you told me.`}
         </p>
       </div>
 
       <div>
-        <PanelLabel>Roles detected</PanelLabel>
+        <PanelLabel>{idle ? "Roles" : "Roles detected"}</PanelLabel>
         <div className="flex flex-wrap gap-2">
           {suggestions.map((s) => (
             <ChoicePill
@@ -111,26 +135,11 @@ export default function StartPanel({
             ? "One role per search on your current plan."
             : `Up to ${maxRoles} roles per search.`}
         </p>
-
-        {unpicked.length > 0 && (
-          <details className="mt-2">
-            <summary className="cursor-pointer text-[11.5px] text-slate-muted">
-              Or pick a common role
-            </summary>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {unpicked.map((role) => (
-                <ChoicePill key={role} dashed onClick={() => onAddRole(role)}>
-                  + {role}
-                </ChoicePill>
-              ))}
-            </div>
-          </details>
-        )}
       </div>
 
       <div>
         <PanelLabel>Search radius</PanelLabel>
-        <div className="flex gap-2">
+        <div ref={radiusRef} className="flex gap-2">
           {radiusOptions.map((km) => (
             <ChoicePill
               key={km}

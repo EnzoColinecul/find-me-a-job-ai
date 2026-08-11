@@ -40,6 +40,11 @@ class Company(BaseModel):
     types: list[str] = []
     website: str | None = None
     roles: list[str]
+    # Read from the Places response so the results map can drop a numbered pin.
+    # Optional: legacy discovery payloads (and any non-Places source) have none,
+    # and a missing pin just means that card has no marker.
+    lat: float | None = None
+    lng: float | None = None
 
 
 class Findings(BaseModel):

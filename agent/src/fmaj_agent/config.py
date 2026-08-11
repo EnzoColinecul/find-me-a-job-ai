@@ -44,38 +44,72 @@ VERTEX_LOCATION = os.environ.get("FMAJ_VERTEX_LOCATION", "global")
 # These exist because SerpAPI's free tier is ~250 searches/MONTH, and that is the
 # binding constraint on how often we can run at all.
 #
-# Companies are investigated in PARALLEL Lambdas (Step Functions Map), so there is
-# no shared live counter to spend against. The ceiling is therefore arithmetic and
-# deliberately pessimistic:
+# HISTORY, because the shape of this matters. Companies are investigated in
+# PARALLEL Lambdas (Step Functions Map), so there was no shared counter to spend
+# against and the ceiling had to be arithmetic:
 #
 #     worst case SerpAPI calls per search = MAX_COMPANIES x MAX_WEB_SEARCHES
 #
-# PoC defaults: 5 x 2 = 10 calls per search -> ~25 searches/month. The agent is
-# also told to try the company's own site and Adzuna first (prompts/system.md),
-# so the real number is usually well under the ceiling — but never above it.
+# That product coupled two unrelated things. Keeping SerpAPI inside its free tier
+# meant dropping MAX_COMPANIES from 40 to 5 — which cut the number of places the
+# user is shown by 8x, to buy headroom on a tool most companies never reach. The
+# knob that was supposed to control cost was silently controlling the product.
+#
+# `budget.DynamoSearchBudget` gives those Lambdas the shared counter they lacked,
+# so the two are now separate:
+#
+#   MAX_COMPANIES              how many places the user gets     -> Places Details
+#   MAX_WEB_SEARCHES_PER_SEARCH  how much SerpAPI a search may use -> SerpAPI
+#
+# Defaults: 40 companies (Details is the Enterprise SKU, 1K/month free -> ~25
+# searches/month) and 10 shared SerpAPI calls (~25 searches/month). Both land on
+# the same number, which is the point — neither knob is now the other's hostage.
+#
+# MAX_WEB_SEARCHES stays as a per-company backstop for when the shared counter
+# can't be reached; see the fail-open note in budget.py.
 #
 # **Set any of these to 0 for unlimited.** That is how production lifts the PoC
-# guard rails without touching code. Raising MAX_COMPANIES also raises the
-# Places Details spend (Enterprise SKU, 1K/month) — see the cost notes in
-# CLAUDE.md before you do.
-MAX_COMPANIES = _limit("FMAJ_MAX_COMPANIES", 5)
+# guard rails without touching code.
+MAX_COMPANIES = _limit("FMAJ_MAX_COMPANIES", 40)
 MAX_WEB_SEARCHES = _limit("FMAJ_MAX_WEB_SEARCHES", 2)
+MAX_WEB_SEARCHES_PER_SEARCH = _limit("FMAJ_MAX_WEB_SEARCHES_PER_SEARCH", 10)
 MAX_TOOL_CALLS = _limit("FMAJ_MAX_TOOL_CALLS", 8)
 MAX_SECONDS = _limit("FMAJ_MAX_SECONDS", 60)
+
+#: Per-search ceilings for metered tools, keyed by tool name. Read at call time
+#: rather than captured, so tests and env overrides both work.
+_SHARED_CAPS = {"web_search": lambda: MAX_WEB_SEARCHES_PER_SEARCH}
+
+
+def shared_cap(tool: str) -> int:
+    """The per-search ceiling for a metered tool. 0 = no shared ceiling."""
+    getter = _SHARED_CAPS.get(tool)
+    return getter() if getter else 0
 
 
 def budget_summary() -> dict:
     """What the caps currently allow — logged per run so a surprising bill is
     traceable to the settings that produced it."""
-    ceiling = (
+    arithmetic = (
         MAX_COMPANIES * MAX_WEB_SEARCHES
         if MAX_COMPANIES and MAX_WEB_SEARCHES
         else 0
     )
+    # The shared cap is the real ceiling when it is set; the arithmetic product
+    # only bites if the counter is unreachable.
+    if MAX_WEB_SEARCHES_PER_SEARCH:
+        effective = (
+            min(MAX_WEB_SEARCHES_PER_SEARCH, arithmetic)
+            if arithmetic
+            else MAX_WEB_SEARCHES_PER_SEARCH
+        )
+    else:
+        effective = arithmetic
     return {
         "max_companies": MAX_COMPANIES or "unlimited",
         "max_web_searches_per_company": MAX_WEB_SEARCHES or "unlimited",
+        "max_web_searches_per_search": MAX_WEB_SEARCHES_PER_SEARCH or "unlimited",
         "max_tool_calls": MAX_TOOL_CALLS or "unlimited",
         "max_seconds": MAX_SECONDS or "unlimited",
-        "worst_case_web_searches_per_search": ceiling or "unlimited",
+        "web_searches_per_search": effective or "unlimited",
     }
