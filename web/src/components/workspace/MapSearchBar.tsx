@@ -129,17 +129,30 @@ export default function MapSearchBar({
   }, [reverseGeocode, onPick, onLocated]);
 
   /*
-   * Auto-locate on first mount. A ref (not `autoLocate` alone) guards it so a
-   * later prop change or a StrictMode double-invoke can't re-prompt — the user
-   * gets exactly one automatic request, and the button remains for retries.
-   * If they've already denied permission the browser rejects synchronously and
-   * the address flow underneath is untouched.
+   * Auto-locate on first mount — but only when the user has *already* granted
+   * geolocation to this origin. An unprompted `getCurrentPosition` on a user who
+   * isn't ready risks a sticky per-origin denial (and Chrome penalises unbidden
+   * prompts), so we gate on the Permissions API and centre silently only on
+   * "granted". "prompt"/"denied", no Permissions API, or an insecure context all
+   * fall through to the manual "Use my location" button — no automatic prompt.
+   * A ref guards against a prop change or StrictMode double-invoke re-firing it.
    */
   const autoLocatedRef = useRef(false);
   useEffect(() => {
     if (!autoLocate || autoLocatedRef.current) return;
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) return;
     autoLocatedRef.current = true;
-    locate();
+    let cancelled = false;
+    void navigator.permissions
+      .query({ name: "geolocation" })
+      .then((status) => {
+        if (!cancelled && status.state === "granted") locate();
+      })
+      // Some browsers reject the "geolocation" name — treat as "don't auto-ask".
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [autoLocate, locate]);
 
   return (
