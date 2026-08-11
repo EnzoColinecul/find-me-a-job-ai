@@ -14,7 +14,10 @@ import MapSearchBar from "./workspace/MapSearchBar";
 import StartPanel from "./workspace/StartPanel";
 import WorkspaceShell from "./workspace/WorkspaceShell";
 
-const SYDNEY = { lat: -33.8688, lng: 151.2093 };
+// Not the default centre any more — a fallback. A fresh workspace auto-requests
+// the user's location on mount (see `autoLocate` below); this is only what the
+// map shows while that resolves, or if the user denies or can't share one.
+const SYDNEY_FALLBACK = { lat: -33.8688, lng: 151.2093 };
 
 /**
  * Mockup 3 — choose the place, confirm the roles, spend the search.
@@ -54,7 +57,7 @@ export default function Workspace({
   newSearchDisabledReason?: string | null;
 }) {
   const router = useRouter();
-  const [center, setCenter] = useState<LatLng>(initialCenter ?? SYDNEY);
+  const [center, setCenter] = useState<LatLng>(initialCenter ?? SYDNEY_FALLBACK);
   const [locationLabel, setLocationLabel] = useState(initialLocationLabel ?? "");
   /** Pin position waiting on an address. Null while nothing is outstanding. */
   const [resolving, setResolving] = useState<LatLng | null>(null);
@@ -159,6 +162,7 @@ export default function Workspace({
           center={center}
           label={locationLabel}
           resolve={resolving}
+          autoLocate={!initialCenter}
           onPick={onPick}
           onLabel={onLabel}
           onLocated={onLocated}

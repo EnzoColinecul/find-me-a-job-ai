@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AddressInput, type LatLng } from "../map/MapPieces";
 import { useReverseGeocode } from "../map/useReverseGeocode";
 import { MapBar } from "./MapBar";
@@ -45,6 +45,7 @@ export default function MapSearchBar({
   center,
   label,
   resolve,
+  autoLocate = false,
   onPick,
   onLabel,
   onLocated,
@@ -54,6 +55,12 @@ export default function MapSearchBar({
   label: string;
   /** Point whose address needs looking up, or null when nothing is pending. */
   resolve: LatLng | null;
+  /**
+   * Fire geolocation once on mount, so a fresh workspace centres on the user
+   * instead of a hardcoded default. Suppressed when the centre was prefilled
+   * (e.g. arriving via "Refine") — nothing to auto-locate over.
+   */
+  autoLocate?: boolean;
   /** A place the user chose outright — coordinates and label together. */
   onPick: (p: LatLng, label: string) => void;
   /** The address for `resolve`, once it comes back. */
@@ -86,7 +93,7 @@ export default function MapSearchBar({
     };
   }, [resolve, reverseGeocode, onLabel]);
 
-  const locate = () => {
+  const locate = useCallback(() => {
     setNote(null);
 
     // Secure-context only. On plain HTTP the API is either absent or silently
@@ -119,7 +126,21 @@ export default function MapSearchBar({
       // A long timeout would leave the button spinning on a bad GPS fix.
       { enableHighAccuracy: false, timeout: 10_000, maximumAge: 60_000 },
     );
-  };
+  }, [reverseGeocode, onPick, onLocated]);
+
+  /*
+   * Auto-locate on first mount. A ref (not `autoLocate` alone) guards it so a
+   * later prop change or a StrictMode double-invoke can't re-prompt — the user
+   * gets exactly one automatic request, and the button remains for retries.
+   * If they've already denied permission the browser rejects synchronously and
+   * the address flow underneath is untouched.
+   */
+  const autoLocatedRef = useRef(false);
+  useEffect(() => {
+    if (!autoLocate || autoLocatedRef.current) return;
+    autoLocatedRef.current = true;
+    locate();
+  }, [autoLocate, locate]);
 
   return (
     <div className="flex flex-col gap-1.5">
