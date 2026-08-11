@@ -68,8 +68,14 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
   JSON), hard budgets in code (see "Cost discipline" — read off `config` at call
   time, not copied into module constants), forced structured report on budget
   breach, token/cost accounting per run. Tools never raise (ToolResult).
-- Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn** (links
-  only via SerpAPI `site:` queries) — ToS requirement, don't "fix" this.
+- Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn for listing
+  content** (links only via SerpAPI `site:` queries) — ToS requirement, don't "fix"
+  this. **One deliberate exception** (2026-08-11): `find_seek_company_page` GETs
+  `au.seek.com/{slug}-jobs/at-this-company` to count job markers and decide whether
+  the page is worth linking. It keeps only the count — no titles or descriptions —
+  and that path carries no `/job/` segment and no query string, so Seek's robots.txt
+  allows it for our UA (`*/job/`, `*?`, `/graphql`, `/api/jobsearch/` are the
+  disallowed ones). Widening this into reading listings would breach the rule.
 - **Trace (`trace.py`) feeds the "nothing hidden" panel, so it must not lie.**
   `TOOL_LABELS` is the one place internal names become display names, and every
   label must name a call we really make (the mockup's `places.details` row is

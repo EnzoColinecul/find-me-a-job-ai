@@ -77,11 +77,12 @@ TOOLS = [
          "company": {"type": "string"}, "role": {"type": "string"}},
          "required": ["company", "role"]}},
     {"name": "find_seek_company_page",
-     "description": ("Check whether Seek has an employer-scoped listings page "
-                     "(au.seek.com/<company>-jobs/at-this-company) for this company. "
-                     "Prefer this over a blind site:seek.com web_search — it filters to "
-                     "this employer instead of matching the name as a search term. "
-                     "Returns the URL only if it resolves; no page content is read."),
+     "description": ("Get this company's Seek employer listings page "
+                     "(au.seek.com/<company>-jobs/at-this-company). Prefer this over a "
+                     "blind site:seek.com web_search, which matches the name as a "
+                     "search term and returns other employers' jobs. Returns a URL "
+                     "ONLY if the page has at least one live vacancy, plus job_count; "
+                     "otherwise it fails and you should not link to Seek."),
      "parameters": {"type": "object", "properties": {"company": {"type": "string"}},
                     "required": ["company"]}},
     {"name": "web_search",

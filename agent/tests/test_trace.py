@@ -49,6 +49,8 @@ def test_empty_results_never_report_found() -> None:
         ("search_jobs_adzuna", {"jobs": []}),
         ("extract_emails", {"emails": []}),
         ("find_careers_link", {"url": ""}),
+        # An employer page we couldn't verify must never read as a find.
+        ("find_seek_company_page", {"job_count": 0}),
     ]:
         tag, _ = summarise_tool_result(name, {}, _Result(ok=True, **payload))
         assert tag is Tag.CHECKING, name

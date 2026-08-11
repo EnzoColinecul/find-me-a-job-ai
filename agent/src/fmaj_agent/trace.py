@@ -105,8 +105,9 @@ def summarise_tool_result(name: str, args: dict, result) -> tuple[Tag, str]:
         query = str(args.get("query", ""))[:48]
         return (Tag.FOUND if n else Tag.CHECKING), f'"{query}"'
     if name == "find_seek_company_page":
-        return (Tag.FOUND, "employer page") if data.get("url") else (
-            Tag.CHECKING, "no page",
+        n = data.get("job_count") or 0
+        return (Tag.FOUND, f"{n} Seek vacanc{'y' if n == 1 else 'ies'}") if n else (
+            Tag.CHECKING, "no listings",
         )
     if name == "extract_emails":
         n = len(data.get("emails") or [])

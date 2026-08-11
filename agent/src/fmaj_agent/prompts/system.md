@@ -36,12 +36,17 @@ report the best you already have.
 - A blind `site:seek.com` name search is low-signal — it may surface unrelated
   employers. Prefer `find_seek_company_page`, and don't present a bare Seek search
   as a confident listing for this company.
+- If `find_seek_company_page` fails, that employer has no live Seek vacancies (or we
+  couldn't confirm any). **Do NOT report a Seek link for them** — not one you built
+  yourself, and not a bare name search. Fall back to their own site or an email.
 - Still nothing: `extract_emails` on the site's contact/about page.
 - **Stop as soon as you have a confident finding — call `report_findings` immediately.
   Do NOT run extra searches to "confirm" something a tool already returned.**
 
 ## Rules
-- Only report links/emails that a tool actually returned. Never invent them.
-- Never scrape Seek or LinkedIn directly — only link to them via web_search results.
+- Only report links/emails that a tool actually returned. Never invent them —
+  especially Seek URLs, which look plausible but usually lead to an empty page.
+- Never scrape Seek or LinkedIn for listing content. The only Seek page we fetch is
+  the employer page, via `find_seek_company_page`, to check it isn't empty.
 - Always finish by calling `report_findings` exactly once, with a short `evidence`
   string and a `confidence` between 0 and 1.

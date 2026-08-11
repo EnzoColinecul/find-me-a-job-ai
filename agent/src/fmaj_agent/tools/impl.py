@@ -146,6 +146,13 @@ _SEEK_SUFFIX_RE = re.compile(
     re.I,
 )
 
+# Seek server-renders its employer pages, so one GET distinguishes a page with
+# vacancies from an empty one WITHOUT executing JavaScript. Verified 2026-08-11:
+#   Boxtech          -> 515,079 bytes, "No matching search results" x1, jobTitle x0
+#   Virtual-IT-Group -> 565,218 bytes, "No matching search results" x0, jobTitle x3
+_SEEK_JOB_MARKER = re.compile(r'data-automation="jobTitle"')
+_SEEK_EMPTY_MARKER = re.compile(r"No matching search results", re.I)
+
 
 def _seek_company_slug(company: str) -> str:
     """Slugify a company name into Seek's employer-page format.
@@ -164,14 +171,22 @@ def _seek_company_slug(company: str) -> str:
 
 
 def find_seek_company_page(company: str) -> ToolResult:
-    """Find Seek's employer-scoped listings page for a company, if it exists.
+    """Return Seek's employer listings page for a company ONLY if it has vacancies.
 
-    Prefers ``au.seek.com/{slug}-jobs/at-this-company`` — Seek's per-employer
-    listings page — over a blind keyword search, which treats the company name as a
-    search term and surfaces unrelated employers. ToS-safe: this is an existence
-    check ONLY. It follows redirects and inspects the final status and URL; it never
-    reads or extracts page content, and it honours robots.txt. Returns the resolved
-    URL, or ``ok=False`` so the caller falls back to a (weaker) web search.
+    Prefers ``au.seek.com/{slug}-jobs/at-this-company`` — Seek's per-employer page —
+    over a blind keyword search, which treats the company name as a search term and
+    surfaces unrelated employers.
+
+    A slug that matches no employer still returns **HTTP 200** with a rendered
+    "No matching search results" page, so status alone proves nothing — an earlier
+    HEAD-only version of this shipped links to empty pages. We therefore require
+    POSITIVE evidence of at least one vacancy before returning a link.
+
+    Conduct: this counts job markers to decide whether to link, and keeps only the
+    count — no titles, descriptions or other listing content are extracted or
+    stored. ``/{slug}-jobs/at-this-company`` carries no ``/job/`` segment and no
+    query string, so Seek's robots.txt permits it for our user-agent; `_allowed`
+    re-checks that at call time and refuses if it ever changes.
     """
     slug = _seek_company_slug(company)
     if not slug:
@@ -180,19 +195,28 @@ def find_seek_company_page(company: str) -> ToolResult:
     if not _allowed(url):
         return ToolResult(ok=False, reason="blocked by robots.txt")
     try:
-        resp = httpx.head(
-            url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT,
-            follow_redirects=True,
-        )
-        if resp.status_code == 405:  # some hosts reject HEAD — retry GET, ignore body
-            resp = _get(url)
+        resp = _get(url)
         if resp.is_error:
             return ToolResult(ok=False, reason=f"http {resp.status_code}")
-        # Seek redirects an unknown employer to a keyword search; if the final URL is
-        # no longer on an /at-this-company path, no employer page exists for this slug.
         if "at-this-company" not in urlparse(str(resp.url)).path:
             return ToolResult(ok=False, reason="no employer page (redirected to search)")
-        return ToolResult(ok=True, data={"url": str(resp.url), "company": company})
+        html = resp.text
+        # The empty-state banner wins over any job marker. On the observed empty page
+        # there were none, but if Seek ever adds "similar jobs" cards to it, counting
+        # markers alone would resurrect exactly the bug this guards against.
+        if _SEEK_EMPTY_MARKER.search(html):
+            return ToolResult(ok=False, reason="employer page has no current listings")
+        jobs = len(_SEEK_JOB_MARKER.findall(html))
+        if jobs:
+            return ToolResult(
+                ok=True,
+                data={"url": str(resp.url), "job_count": jobs, "company": company},
+            )
+        # Neither marker: Seek's markup probably changed. Fail CLOSED — surfacing a
+        # link we can't vouch for is the bug this function exists to prevent — but
+        # say so distinctly, so the trace shows a broken detector rather than an
+        # employer that genuinely has no openings.
+        return ToolResult(ok=False, reason="could not confirm listings (markup changed?)")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
 

@@ -110,40 +110,74 @@ def test_seek_company_slug_formats() -> None:
 
 
 @respx.mock
-def test_seek_company_page_resolves() -> None:
+def test_seek_company_page_returns_url_when_it_has_vacancies() -> None:
     impl._robot_cache.clear()
     respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
     url = "https://au.seek.com/Virtual-IT-Group-jobs/at-this-company"
-    respx.head(url).mock(return_value=httpx.Response(200))
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200,
+            html='<div data-automation="jobTitle">A</div>'
+                 '<div data-automation="jobTitle">B</div>'
+                 '<div data-automation="jobTitle">C</div>',
+        )
+    )
     r = impl.find_seek_company_page("Virtual IT Group")
     assert r.ok
     assert r.data["url"] == url
+    assert r.data["job_count"] == 3
 
 
 @respx.mock
-def test_seek_company_page_redirect_to_search_is_rejected() -> None:
-    """A slug with no employer page redirects to a keyword search — reject it."""
+def test_seek_company_page_with_no_results_is_rejected() -> None:
+    """The reported bug: Seek serves 200 + an empty page for an unknown employer.
+
+    Observed 2026-08-11 for `Boxtech` — 515KB of HTML, zero job markers. A link to
+    this must never reach the user.
+    """
     impl._robot_cache.clear()
     respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
-    respx.head("https://au.seek.com/Nowhere-Cafe-jobs/at-this-company").mock(
+    respx.get("https://au.seek.com/Boxtech-jobs/at-this-company").mock(
         return_value=httpx.Response(
-            302, headers={"Location": "https://au.seek.com/Nowhere-Cafe-jobs"}
+            200, html="<h1>No matching search results</h1>" + "<div>filler</div>" * 500
         )
     )
-    respx.head("https://au.seek.com/Nowhere-Cafe-jobs").mock(
-        return_value=httpx.Response(200)
-    )
-    r = impl.find_seek_company_page("Nowhere Cafe")
+    r = impl.find_seek_company_page("Boxtech")
     assert not r.ok
-    assert "no employer page" in r.reason
+    assert "no current listings" in r.reason
+
+
+@respx.mock
+def test_seek_company_page_fails_closed_when_markers_are_missing() -> None:
+    """Unrecognised markup must not be read as 'has vacancies'."""
+    impl._robot_cache.clear()
+    respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://au.seek.com/Redesigned-Co-jobs/at-this-company").mock(
+        return_value=httpx.Response(200, html="<main>totally new markup</main>")
+    )
+    r = impl.find_seek_company_page("Redesigned Co")
+    assert not r.ok
+    assert "could not confirm" in r.reason
 
 
 @respx.mock
 def test_seek_company_page_404_is_not_raised() -> None:
     impl._robot_cache.clear()
     respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
-    respx.head("https://au.seek.com/Ghost-Co-jobs/at-this-company").mock(
+    respx.get("https://au.seek.com/Ghost-Co-jobs/at-this-company").mock(
         return_value=httpx.Response(404)
     )
     r = impl.find_seek_company_page("Ghost Co")
     assert not r.ok and "404" in r.reason
+
+
+@respx.mock
+def test_seek_company_page_respects_robots() -> None:
+    """If Seek ever disallows the employer path, the tool must refuse."""
+    impl._robot_cache.clear()
+    respx.get("https://au.seek.com/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    r = impl.find_seek_company_page("Virtual IT Group")
+    assert not r.ok
+    assert "robots" in r.reason
