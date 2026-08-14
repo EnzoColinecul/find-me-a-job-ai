@@ -1,0 +1,25 @@
+# Runtime deps for the API Lambda bundle (app.main.handler via Mangum).
+#
+# Kept separate from pyproject.toml because the Lambda build pins the target
+# platform (manylinux x86_64) so compiled wheels (pydantic-core, cryptography)
+# match the function architecture regardless of build host (Apple Silicon vs CI).
+# boto3/botocore are provided by the Lambda runtime — excluded to keep the zip small.
+#
+# The API bundles the agent package too: /roles/interpret calls fmaj_agent.interpret
+# (one LLM round-trip), so the agent's runtime deps are included here as well.
+
+# --- API ---
+fastapi>=0.115
+mangum>=0.19
+pydantic-settings>=2.6
+pyjwt[crypto]>=2.9
+python-dotenv>=1.0
+fpdf2>=2.8
+
+# --- agent (imported by /roles/interpret) ---
+httpx>=0.27
+pydantic>=2.9
+beautifulsoup4>=4.12
+trafilatura>=1.12
+pyyaml>=6.0
+google-genai>=1.0
