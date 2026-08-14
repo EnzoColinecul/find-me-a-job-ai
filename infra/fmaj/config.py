@@ -1,13 +1,14 @@
 """Per-stage configuration. Everything stage-specific lives here."""
+
 from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class StageConfig:
-    stage: str                     # "test" | "prod"
-    monthly_search_cap: int        # global cap protecting Places/Bedrock free tiers
+    stage: str  # "test" | "prod"
+    monthly_search_cap: int  # global cap protecting Places/Bedrock free tiers
     log_retention_days: int
-    app_base_url: str              # frontend origin (used for CORS + OAuth callback)
+    app_base_url: str  # frontend origin (used for CORS + OAuth callback)
     report_expiry_days: int = 7
     # LLM backend for the agent: "gemini" (Vertex, GCP credits) or "bedrock"
     llm_provider: str = "gemini"
@@ -54,6 +55,7 @@ TEST = StageConfig(
     monthly_search_cap=10,
     log_retention_days=7,
     app_base_url="http://localhost:3000",
+    hosting_urls=["https://main.d3ki9z08su1o3w.amplifyapp.com"],
 )
 
 PROD = StageConfig(
