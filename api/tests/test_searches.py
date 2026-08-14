@@ -15,18 +15,99 @@ class FakeTable:
     def put_item(self, Item, ConditionExpression=None):  # noqa: N803
         self.store[(Item["PK"], Item["SK"])] = Item
 
-    def update_item(self, Key, UpdateExpression, ConditionExpression, ExpressionAttributeValues):  # noqa: N803
+    def get_item(self, Key):  # noqa: N803
         item = self.store.get((Key["PK"], Key["SK"]))
-        # emulate: attribute_exists(PK) AND free_search_used = :f
-        if item is None or item.get("free_search_used") is not False:
+        return {"Item": item} if item else {}
+
+    def update_item(  # noqa: N803
+        self,
+        Key,
+        UpdateExpression,
+        ExpressionAttributeValues,
+        ConditionExpression=None,
+        ExpressionAttributeNames=None,
+    ):
+        item = self.store.get((Key["PK"], Key["SK"]))
+        names = ExpressionAttributeNames or {}
+        values = ExpressionAttributeValues or {}
+
+        def _reject():
             raise ClientError(
                 {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
             )
-        item["free_search_used"] = True
 
-    def query(self, KeyConditionExpression, ExpressionAttributeValues):  # noqa: N803
-        pk = ExpressionAttributeValues[":pk"]
-        return {"Items": [v for (p, _), v in self.store.items() if p == pk]}
+        # Conditions are matched by the attribute they name rather than parsed:
+        # a real expression parser in a test fake would be a second
+        # implementation to keep correct, and these are the only three shapes
+        # the app ever sends.
+        if ConditionExpression is not None:
+            if "free_search_used" in ConditionExpression:
+                if item is None or item.get("free_search_used") is not False:
+                    _reject()
+                item["free_search_used"] = True
+                return
+
+            if "active_since" in ConditionExpression:
+                # compare-and-swap: the lease must still be what the caller read
+                if item is None or item.get("active_since", "") != values[":expected"]:
+                    _reject()
+                item["active_since"] = values[":now"]
+                item["active_search_id"] = values[":sid"]
+                return
+
+            if "#c" in ConditionExpression:
+                if item is None:
+                    item = {"PK": Key["PK"], "SK": Key["SK"]}
+                    self.store[(Key["PK"], Key["SK"])] = item
+                count = item.get("count")
+                if ":cap" in values:  # reserve
+                    if count is not None and count >= values[":cap"]:
+                        _reject()
+                    item["count"] = (count or 0) + values[":one"]
+                else:  # release
+                    if not count or count <= values[":zero"]:
+                        _reject()
+                    item["count"] = count + values[":minus"]
+                return
+
+            raise AssertionError(f"unhandled condition: {ConditionExpression}")
+
+        # Unconditional SET: apply "SET a = :x, b = :y" against the item, mapping
+        # #name placeholders back to real attribute names.
+        if item is None:
+            item = {"PK": Key["PK"], "SK": Key["SK"]}
+            self.store[(Key["PK"], Key["SK"])] = item
+        names = ExpressionAttributeNames or {}
+        for clause in UpdateExpression.removeprefix("SET ").split(","):
+            attr, _, placeholder = clause.strip().partition(" = ")
+            item[names.get(attr, attr)] = ExpressionAttributeValues[placeholder.strip()]
+
+    def query(  # noqa: N803
+        self,
+        KeyConditionExpression,
+        ExpressionAttributeValues=None,
+        ScanIndexForward=True,
+        Limit=None,
+    ):
+        """Supports both call styles: the raw "PK = :pk" string used by get_search,
+        and the boto3 Key() condition objects used by list_searches."""
+        if ExpressionAttributeValues is not None:
+            pk = ExpressionAttributeValues[":pk"]
+            prefix = ""
+        else:
+            values = KeyConditionExpression.get_expression()["values"]
+            pk = values[0].get_expression()["values"][1]
+            prefix = values[1].get_expression()["values"][1]
+
+        items = [
+            v
+            for (p, s), v in self.store.items()
+            if p == pk and s.startswith(prefix)
+        ]
+        items.sort(key=lambda i: i["SK"], reverse=not ScanIndexForward)
+        if Limit is not None:
+            items = items[:Limit]
+        return {"Items": items}
 
 
 @pytest.fixture()
@@ -93,11 +174,118 @@ def test_create_search_consumes_quota(table) -> None:
     assert table.store[("USER#u1", "PROFILE")]["free_search_used"] is True
 
 
+def _finish(table, search_id, status="completed"):
+    """Mark a search terminal, as the pipeline would. Frees the concurrency lease."""
+    table.store[(f"SEARCH#{search_id}", "META")]["status"] = status
+
+
 def test_second_search_rejected(table) -> None:
     _user(table)
-    searches.create_search("u1", SearchRequest(**VALID))
+    meta = searches.create_search("u1", SearchRequest(**VALID))
+    # Let the first one finish, so it's the *quota* being tested here and not
+    # the concurrency lease, which would reject for a different reason.
+    _finish(table, meta["search_id"])
     with pytest.raises(QuotaExhausted):
         searches.create_search("u1", SearchRequest(**VALID))
+
+
+def test_concurrent_search_rejected_while_first_runs(table) -> None:
+    _user(table)
+    searches.create_search("u1", SearchRequest(**VALID))
+    table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+    with pytest.raises(searches.SearchInProgress):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+
+def test_lease_frees_as_soon_as_the_search_finishes(table) -> None:
+    """The whole point of tracking the search id: no waiting out the clock."""
+    _user(table)
+    meta = searches.create_search("u1", SearchRequest(**VALID))
+    _finish(table, meta["search_id"])
+    table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+    searches.create_search("u1", SearchRequest(**VALID))  # no exception
+
+
+def test_lease_expires_if_the_search_never_finishes(table, monkeypatch) -> None:
+    """A pipeline that dies mid-run must not lock the user out permanently."""
+    from app.settings import settings
+
+    _user(table)
+    searches.create_search("u1", SearchRequest(**VALID))  # stays "pending"
+    table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+
+    with pytest.raises(searches.SearchInProgress):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+    monkeypatch.setattr(settings, "search_lease_minutes", 0)
+    searches.create_search("u1", SearchRequest(**VALID))  # lease aged out
+
+
+def test_monthly_cap_rejects_once_spent(table, monkeypatch) -> None:
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 2)
+    for i in range(2):
+        _user(table, sub=f"u{i}")
+        searches.create_search(f"u{i}", SearchRequest(**VALID))
+
+    _user(table, sub="u9")
+    with pytest.raises(searches.MonthlyCapReached):
+        searches.create_search("u9", SearchRequest(**VALID))
+
+
+def test_monthly_cap_counts_across_users(table, monkeypatch) -> None:
+    """It's a global budget, not a per-user one — one counter item for everyone."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 5)
+    for i in range(3):
+        _user(table, sub=f"u{i}")
+        searches.create_search(f"u{i}", SearchRequest(**VALID))
+
+    month = searches._month_key()
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{month}")]["count"] == 3
+
+
+def test_rejected_search_does_not_eat_the_monthly_slot(table, monkeypatch) -> None:
+    """A user out of personal quota must not burn the shared budget too."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 5)
+    _user(table, used=True)
+    with pytest.raises(QuotaExhausted):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+    month = searches._month_key()
+    counter = table.store.get(("SYSTEM#QUOTA", f"MONTH#{month}"))
+    assert counter is None or counter["count"] == 0
+
+
+def test_rejected_search_releases_the_lease(table, monkeypatch) -> None:
+    """...and doesn't leave them locked out on the way through, either."""
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 5)
+    _user(table, used=True)
+    with pytest.raises(QuotaExhausted):
+        searches.create_search("u1", SearchRequest(**VALID))
+    assert table.store[("USER#u1", "PROFILE")].get("active_since") == ""
+
+
+def test_monthly_cap_of_zero_is_unlimited(table, monkeypatch) -> None:
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "global_monthly_searches", 0)
+    for i in range(4):
+        _user(table, sub=f"u{i}")
+        searches.create_search(f"u{i}", SearchRequest(**VALID))
+
+
+def test_stopping_a_search_frees_the_lease(table) -> None:
+    _user(table)
+    meta = searches.create_search("u1", SearchRequest(**VALID))
+    searches.stop_search("u1", meta["search_id"])
+    assert table.store[("USER#u1", "PROFILE")]["active_since"] == ""
 
 
 def test_get_search_owner_only(table) -> None:
@@ -109,6 +297,49 @@ def test_get_search_owner_only(table) -> None:
     assert mine is not None and mine["status"] == "pending"
     assert searches.get_search("intruder", sid) is None
     assert searches.get_search("u1", "nope") is None
+
+
+def test_list_searches_newest_first_and_owner_scoped(table, monkeypatch) -> None:
+    from app.settings import settings
+
+    # The free-search quota caps a real user at one search, so lift it here to
+    # exercise ordering the way a subscribed user would see it.
+    monkeypatch.setattr(settings, "max_roles", 3)
+    _user(table)
+    _user(table, sub="u2")
+
+    for role, label in [("chef", "Surry Hills"), ("barista", "Newtown")]:
+        table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+        table.store[("USER#u1", "PROFILE")]["active_since"] = ""
+        searches.create_search(
+            "u1",
+            SearchRequest(**{**VALID, "roles": [role], "location_label": label}),
+        )
+    searches.create_search(
+        "u2", SearchRequest(**{**VALID, "roles": ["retail assistant"]})
+    )
+
+    mine = searches.list_searches("u1")
+    assert [s["roles"] for s in mine] == [["barista"], ["chef"]]  # newest first
+    assert mine[0]["location_label"] == "Newtown"
+    assert len(searches.list_searches("u2")) == 1
+    assert searches.list_searches("nobody") == []
+
+
+def test_list_searches_respects_limit(table) -> None:
+    _user(table)
+    for _ in range(3):
+        table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
+        table.store[("USER#u1", "PROFILE")]["active_since"] = ""
+        searches.create_search("u1", SearchRequest(**VALID))
+    assert len(searches.list_searches("u1", limit=2)) == 2
+
+
+def test_profile_item_is_not_listed_as_a_search(table) -> None:
+    """USER#<sub> holds PROFILE alongside the search index — don't confuse them."""
+    _user(table)
+    searches.create_search("u1", SearchRequest(**VALID))
+    assert len(searches.list_searches("u1")) == 1
 
 
 def test_get_search_includes_results(table) -> None:
@@ -125,3 +356,154 @@ def test_get_search_includes_results(table) -> None:
     found = searches.get_search("u1", sid)
     assert found["total"] == 1
     assert found["results"][0]["company"] == "Cafe X"
+
+
+def test_result_carries_pin_coordinates_when_present(table) -> None:
+    """A PIN# item merges lat/lng onto its result so the map can place it."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "RESULT#place1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": "RESULT#place1",
+        "company": "Cafe X",
+        "opportunity_type": "careers_page",
+    }
+    table.store[(f"SEARCH#{sid}", "PIN#place1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": "PIN#place1",
+        "lat": "-33.884",
+        "lng": "151.207",
+    }
+    r = searches.get_search("u1", sid)["results"][0]
+    assert r["lat"] == pytest.approx(-33.884)
+    assert r["lng"] == pytest.approx(151.207)
+
+
+def test_result_without_a_pin_has_null_coordinates(table) -> None:
+    """No PIN# (older/expired search) → null coords, and the pin isn't counted
+    as a result."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "RESULT#place1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": "RESULT#place1",
+        "company": "Cafe X",
+        "opportunity_type": "careers_page",
+    }
+    found = searches.get_search("u1", sid)
+    assert found["total"] == 1  # a PIN# must never be mistaken for a result
+    assert found["results"][0]["lat"] is None
+    assert found["results"][0]["lng"] is None
+
+
+# ---- trace steps, progress and Stop -----------------------------------------
+
+
+def _step(table, sid, at, tag="checking", tool="fetch_page", text="Cafe X", meta=""):
+    table.store[(f"SEARCH#{sid}", f"STEP#{at}#p1")] = {
+        "PK": f"SEARCH#{sid}",
+        "SK": f"STEP#{at}#p1",
+        "tag": tag,
+        "tool": tool,
+        "text": text,
+        "meta": meta,
+        "at": at,
+    }
+
+
+def test_steps_come_back_in_chronological_order(table) -> None:
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    # Inserted out of order on purpose.
+    _step(table, sid, "2026-08-04T10:00:02", tool="fetch_page")
+    _step(table, sid, "2026-08-04T10:00:01", tag="searching", tool="places.nearby")
+    _step(table, sid, "2026-08-04T10:00:03", tag="found", tool="extract_contact")
+
+    steps = searches.get_search("u1", sid)["steps"]
+    assert [s["tool"] for s in steps] == [
+        "places.nearby",
+        "fetch_page",
+        "extract_contact",
+    ]
+
+
+def test_steps_are_not_mistaken_for_results(table) -> None:
+    """STEP# and RESULT# share the search partition — they must stay separate."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    _step(table, sid, "2026-08-04T10:00:01")
+    found = searches.get_search("u1", sid)
+    assert found["total"] == 0
+    assert found["results"] == []
+    assert len(found["steps"]) == 1
+
+
+def test_progress_counts_only_investigated_companies(table) -> None:
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "META")]["company_count"] = 3
+    for i, otype in enumerate(["careers_page", "pending", "none"]):
+        table.store[(f"SEARCH#{sid}", f"RESULT#p{i}")] = {
+            "PK": f"SEARCH#{sid}",
+            "SK": f"RESULT#p{i}",
+            "opportunity_type": otype,
+        }
+    # 2 of 3 finished: "pending" hasn't been investigated yet, but "none" has —
+    # a company the agent checked and rejected is still progress.
+    assert searches.get_search("u1", sid)["progress"] == {"done": 2, "total": 3}
+
+
+def test_progress_total_is_zero_before_discovery_reports(table) -> None:
+    """Don't guess the denominator from partial results — say we don't know."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    assert searches.get_search("u1", sid)["progress"] == {"done": 0, "total": 0}
+
+
+def test_stop_marks_cancelled_and_halts_the_execution(table, monkeypatch) -> None:
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "META")]["execution_arn"] = "arn:aws:states:::exec/x"
+
+    stopped: list = []
+    monkeypatch.setattr(
+        searches,
+        "_get_sfn",
+        lambda: type("S", (), {"stop_execution": lambda _s, **kw: stopped.append(kw)})(),
+    )
+
+    assert searches.stop_search("u1", sid)["status"] == "cancelled"
+    assert stopped and stopped[0]["executionArn"] == "arn:aws:states:::exec/x"
+    assert searches.get_search("u1", sid)["status"] == "cancelled"
+
+
+def test_stop_is_rejected_once_the_search_has_finished(table) -> None:
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "META")]["status"] = "completed"
+    with pytest.raises(searches.NotStoppable):
+        searches.stop_search("u1", sid)
+
+
+def test_stop_still_cancels_when_the_execution_is_already_gone(table, monkeypatch) -> None:
+    """The pipeline may not be deployed, or the execution already ended. The user
+    asked for it to stop — don't leave it 'running' forever."""
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    table.store[(f"SEARCH#{sid}", "META")]["execution_arn"] = "arn:bad"
+
+    def boom(**_kw):
+        raise ClientError({"Error": {"Code": "ExecutionDoesNotExist"}}, "StopExecution")
+
+    monkeypatch.setattr(
+        searches,
+        "_get_sfn",
+        lambda: type("S", (), {"stop_execution": lambda _s, **kw: boom(**kw)})(),
+    )
+    assert searches.stop_search("u1", sid)["status"] == "cancelled"
+
+
+def test_stop_refuses_someone_elses_search(table) -> None:
+    _user(table)
+    sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
+    assert searches.stop_search("someone-else", sid) is None

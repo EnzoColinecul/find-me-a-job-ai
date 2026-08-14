@@ -76,9 +76,19 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {
          "company": {"type": "string"}, "role": {"type": "string"}},
          "required": ["company", "role"]}},
+    {"name": "find_seek_company_page",
+     "description": ("Get this company's Seek employer listings page "
+                     "(au.seek.com/<company>-jobs/at-this-company). Prefer this over a "
+                     "blind site:seek.com web_search, which matches the name as a "
+                     "search term and returns other employers' jobs. Returns a URL "
+                     "ONLY if the page has at least one live vacancy, plus job_count; "
+                     "otherwise it fails and you should not link to Seek."),
+     "parameters": {"type": "object", "properties": {"company": {"type": "string"}},
+                    "required": ["company"]}},
     {"name": "web_search",
-     "description": ("Google search (SerpAPI). Use site:seek.com.au or "
-                     "site:linkedin.com/jobs with the company name. Returns links only."),
+     "description": ("Google search (SerpAPI). For Seek, try find_seek_company_page "
+                     "first; use this for site:linkedin.com/jobs, or only as a weak "
+                     "last-resort site:seek.com name search. Returns links only."),
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
                     "required": ["query"]}},
     {"name": "extract_emails",

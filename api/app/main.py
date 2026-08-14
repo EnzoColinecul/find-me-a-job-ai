@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
@@ -9,11 +9,34 @@ from pydantic import BaseModel
 logger = logging.getLogger("fmaj")
 
 from app.auth import AuthUser, require_user
-from app.searches import QuotaExhausted, SearchRequest, create_search, get_search
+from app.searches import (
+    MonthlyCapReached,
+    NotStoppable,
+    QuotaExhausted,
+    SearchInProgress,
+    SearchRequest,
+    create_search,
+    get_search,
+    list_searches,
+    stop_search,
+)
 from app.settings import settings
 from app.users import ensure_user
 
 app = FastAPI(title="Find-Me-A-Job AI API", version="0.1.0")
+
+
+def api_error(status: int, code: str, message: str) -> HTTPException:
+    """A failure the frontend can branch on without parsing prose.
+
+    `message` is shown to the user as-is; `code` is the stable name. The two are
+    separate so copy can be reworded without breaking a client that keys off it —
+    and so the client can decide, say, that a monthly cap deserves a different
+    treatment from a spent personal quota, which reads identically otherwise.
+    """
+    return HTTPException(
+        status_code=status, detail={"code": code, "message": message}
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +55,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     an opaque 'Failed to fetch' instead of the real error.
     """
     logger.exception("Unhandled error on %s %s: %s", request.method, request.url.path, exc)
-    return JSONResponse(status_code=500, content={"detail": f"Internal error: {type(exc).__name__}"})
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "internal_error",
+                # The exception type, not its message: the type is enough to
+                # find the log line, and messages can carry table names, ARNs or
+                # user data we don't want in a browser.
+                "message": f"Something went wrong on our side ({type(exc).__name__}).",
+            }
+        },
+    )
 
 
 @app.get("/health")
@@ -88,23 +122,88 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
 def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> dict:
     try:
         meta = create_search(user.sub, req)
+    except SearchInProgress:
+        # 409, not 429: nothing is being rate-limited, they simply already have
+        # one running and the honest fix is to wait for it or stop it.
+        raise api_error(
+            409,
+            "search_in_progress",
+            "You already have a search running. Wait for it to finish, or stop it first.",
+        ) from None
+    except MonthlyCapReached:
+        raise api_error(
+            429,
+            "monthly_cap",
+            "We've hit this month's search limit while the app is in preview. "
+            "Please try again next month.",
+        ) from None
     except QuotaExhausted:
-        raise HTTPException(
-            status_code=402,
-            detail="Your free search has been used. Subscriptions are coming soon!",
+        raise api_error(
+            402,
+            "quota_exhausted",
+            "Your free search has been used. Subscriptions are coming soon!",
         ) from None
     return {"search_id": meta["search_id"], "status": meta["status"]}
+
+
+@app.get("/searches")
+def list_searches_route(
+    limit: int = Query(default=10, ge=1, le=50),
+    user: AuthUser = Depends(require_user),
+) -> dict:
+    """The signed-in user's recent searches, newest first (workspace left rail).
+
+    Descriptive only — no status. The rail links through to /searches/{id}, which
+    polls the live status, so nothing here can go stale.
+    """
+    return {"searches": list_searches(user.sub, limit)}
 
 
 @app.get("/searches/{search_id}")
 def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
     found = get_search(user.sub, search_id)
     if found is None:
-        raise HTTPException(status_code=404, detail="Search not found")
+        raise api_error(404, "not_found", "We couldn't find that search.")
     return found
 
 
-# TODO(Phase 4): GET /searches/{search_id}/report — presigned PDF URL.
+@app.post("/searches/{search_id}/stop")
+def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+    """Stop a running search. No quota is refunded — the work was done."""
+    try:
+        stopped = stop_search(user.sub, search_id)
+    except NotStoppable as exc:
+        raise api_error(
+            409, "not_stoppable", f"This search is already {exc}."
+        ) from None
+    if stopped is None:
+        raise api_error(404, "not_found", "We couldn't find that search.")
+    return stopped
+
+
+@app.get("/searches/{search_id}/report")
+def get_report_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+    """A presigned URL to the search's PDF report.
+
+    The PDF is a snapshot, so it only exists for a finished search — a running
+    one gets 409 rather than a report that disagrees with the next poll. The
+    object is cached in S3, so the second download of the same search re-presigns
+    rather than re-rendering.
+    """
+    from app.reports import ReportNotReady, get_report_url
+
+    try:
+        report = get_report_url(user.sub, search_id)
+    except ReportNotReady:
+        raise api_error(
+            409,
+            "report_not_ready",
+            "This search hasn't finished yet — give it a moment, then try again.",
+        ) from None
+    if report is None:
+        raise api_error(404, "not_found", "We couldn't find that search.")
+    return report
+
 
 # Lambda entrypoint
 handler = Mangum(app)

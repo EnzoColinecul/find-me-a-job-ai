@@ -19,6 +19,11 @@ class DataStack(cdk.Stack):
             billing_mode=ddb.BillingMode.PROVISIONED,  # 25/25 free tier
             read_capacity=10,
             write_capacity=10,
+            # STEP# items (the live agent trace) set `expires_at`. They are
+            # progress, not a record: expiring them keeps the table small and
+            # avoids holding Places-derived company names indefinitely.
+            # Nothing else sets the attribute, so nothing else expires.
+            time_to_live_attribute="expires_at",
             removal_policy=cdk.RemovalPolicy.DESTROY
             if config.stage == "test"
             else cdk.RemovalPolicy.RETAIN,

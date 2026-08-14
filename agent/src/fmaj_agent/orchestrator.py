@@ -16,26 +16,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fmaj_agent import config
+from fmaj_agent.budget import NoSharedBudget, SearchBudget
 from fmaj_agent.models import Company, Findings, OpportunityType
 from fmaj_agent.providers import get_provider
 from fmaj_agent.tools import (
     extract_emails,
     fetch_url,
     find_careers_link,
+    find_seek_company_page,
     search_jobs_adzuna,
     web_search,
+)
+from fmaj_agent.trace import (
+    StepSink,
+    Tag,
+    TraceStep,
+    noop_sink,
+    summarise_tool_result,
 )
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 8
-MAX_SECONDS = 60
 _SYSTEM = (Path(__file__).parent / "prompts" / "system.md").read_text()
+
+#: Tools with their own per-company budget on top of the shared tool-call limit.
+#: SerpAPI's free tier is ~250 searches a MONTH, so `web_search` is metered
+#: separately — see the arithmetic in config.py.
+_METERED = {"web_search": lambda: config.MAX_WEB_SEARCHES}
 
 _DISPATCH = {
     "fetch_url": lambda a: fetch_url(a["url"]),
     "find_careers_link": lambda a: find_careers_link(a["url"]),
     "search_jobs_adzuna": lambda a: search_jobs_adzuna(a["company"], a["role"]),
+    "find_seek_company_page": lambda a: find_seek_company_page(a["company"]),
     "web_search": lambda a: web_search(a["query"]),
     "extract_emails": lambda a: extract_emails(a["url"]),
 }
@@ -49,6 +62,8 @@ class AgentRun:
     output_tokens: int = 0
     seconds: float = 0.0
     trace: list[str] = field(default_factory=list)
+    #: Calls per metered tool, so a run's paid-API spend is visible afterwards.
+    metered_calls: dict[str, int] = field(default_factory=dict)
     # Set when the run aborted due to an infrastructure failure (network/model),
     # NOT because the agent legitimately found nothing. Callers must not treat
     # these as real findings.
@@ -59,12 +74,45 @@ class AgentRun:
             "provider": config.LLM_PROVIDER,
             "error": self.error or "",
             "tool_calls": self.tool_calls,
+            "web_searches": self.metered_calls.get("web_search", 0),
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "seconds": round(self.seconds, 1),
             "opportunity_type": self.findings.opportunity_type.value,
             "confidence": self.findings.confidence,
         }
+
+
+def _over_budget(run: AgentRun, tool: str, budget: SearchBudget) -> str | None:
+    """Reserve one call of a metered tool. Returns a refusal reason, or None.
+
+    Two gates, in-process first: the per-company cap costs nothing to check, so
+    checking it first avoids a DynamoDB write for a call we were going to refuse
+    anyway.
+
+    Counts the call only when both allow it, so `metered_calls` records real
+    paid-API usage rather than attempts.
+    """
+    if tool not in _METERED:
+        return None
+    cap = _METERED[tool]()
+    used = run.metered_calls.get(tool, 0)
+    if cap and used >= cap:  # cap == 0 means unlimited
+        return f"budget reached: {cap} {tool} call(s) per company"
+    denial = budget.reserve(tool)
+    if denial is not None:
+        return denial
+    run.metered_calls[tool] = used + 1
+    return None
+
+
+def _emit(sink: StepSink, step: TraceStep) -> None:
+    """Publish a trace step. A broken sink must never fail the investigation —
+    the panel is a view onto the work, not the work itself."""
+    try:
+        sink(step)
+    except Exception:  # noqa: BLE001
+        logger.warning("trace sink failed for %s", step.tool, exc_info=True)
 
 
 def _model() -> str:
@@ -109,13 +157,33 @@ def _findings_from_report(args: dict) -> Findings:
     )
 
 
-def investigate(company: Company) -> AgentRun:
-    """Run the full investigation for one company. Never raises."""
+def investigate(
+    company: Company,
+    on_step: StepSink = noop_sink,
+    budget: SearchBudget | None = None,
+) -> AgentRun:
+    """Run the full investigation for one company. Never raises.
+
+    `on_step` is called as each tool completes so the UI can show the run while
+    it is still happening. A sink that throws must never take the search down
+    with it — see `_emit`.
+
+    `budget` meters paid tools across every company in the same search. Defaults
+    to no shared ceiling, which is right for a local run: there is only one
+    company in flight, so the per-company cap already is the per-search cap.
+    """
+    budget = budget or NoSharedBudget()
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
     start = time.monotonic()
+
+    def emit(tag: Tag, tool: str, meta: str = "") -> None:
+        _emit(on_step, TraceStep(tag=tag, tool=tool, text=company.name,
+                                 meta=meta, place_id=company.place_id))
+
     try:
         provider = get_provider()
         if not _triage(company, run):
+            emit(Tag.SKIPPING, "triage", "not a likely employer")
             run.findings = Findings(
                 opportunity_type=OpportunityType.NONE,
                 evidence="triage: not a plausible employer for the role",
@@ -123,6 +191,7 @@ def investigate(company: Company) -> AgentRun:
             )
             run.seconds = time.monotonic() - start
             return run
+        emit(Tag.CHECKING, "triage", "worth a look")
 
         user = (
             f"Investigate this company for job opportunities.\n"
@@ -133,7 +202,13 @@ def investigate(company: Company) -> AgentRun:
         )
         messages: list[dict] = [{"role": "user", "text": user}]
 
-        while run.tool_calls < MAX_TOOL_CALLS and (time.monotonic() - start) < MAX_SECONDS:
+        # Read off `config` at call time rather than copied into module constants,
+        # so overriding the budget is a one-line change in one place (and tests
+        # can patch it). 0 = unlimited — see config.py for the arithmetic.
+        max_calls = config.MAX_TOOL_CALLS or float("inf")
+        max_seconds = config.MAX_SECONDS or float("inf")
+
+        while run.tool_calls < max_calls and (time.monotonic() - start) < max_seconds:
             turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024)
             run.input_tokens += turn.input_tokens
             run.output_tokens += turn.output_tokens
@@ -150,11 +225,31 @@ def investigate(company: Company) -> AgentRun:
                 if tu.name == "report_findings":
                     run.findings = _findings_from_report(tu.input)
                     done = True
+                    emit(
+                        Tag.FOUND
+                        if run.findings.opportunity_type is not OpportunityType.NONE
+                        else Tag.SKIPPING,
+                        "report_findings",
+                        run.findings.opportunity_type.value.replace("_", " "),
+                    )
                     results.append({"id": tu.id, "name": tu.name, "output": {"ok": True}})
                     continue
                 run.tool_calls += 1
+
+                denial = _over_budget(run, tu.name, budget)
+                if denial is not None:
+                    # Refuse rather than silently dropping the call: the model is
+                    # told why, so it can fall back to a cheaper source, and the
+                    # trace shows the refusal instead of a phantom step.
+                    emit(Tag.SKIPPING, tu.name, denial)
+                    results.append({"id": tu.id, "name": tu.name,
+                                    "output": {"ok": False, "reason": denial}})
+                    continue
+
                 result = _DISPATCH[tu.name](tu.input) if tu.name in _DISPATCH else None
                 output = result.model_dump() if result else {"ok": False, "reason": "unknown"}
+                tag, meta = summarise_tool_result(tu.name, tu.input, result)
+                emit(tag, tu.name, meta)
                 results.append({"id": tu.id, "name": tu.name, "output": output})
             messages.append({"role": "tool", "results": results})
             if done:
@@ -165,6 +260,7 @@ def investigate(company: Company) -> AgentRun:
     except Exception as exc:  # noqa: BLE001 — one company's failure must not crash the batch
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
+        emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")
         run.findings = Findings(
             opportunity_type=OpportunityType.NONE,
             evidence=f"agent error: {type(exc).__name__}",

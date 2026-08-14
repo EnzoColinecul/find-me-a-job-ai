@@ -13,18 +13,30 @@ class StageConfig:
     llm_provider: str = "gemini"
     # Extra allowed callback origins (e.g. deployed preview URL) beyond app_base_url
     extra_callback_urls: list[str] = field(default_factory=list)
+    # Deployed frontend origins (Amplify Hosting), scheme+host with NO trailing
+    # slash, e.g. "https://main.d123.amplifyapp.com". One list feeds three places
+    # that must agree — Cognito callback URLs, Cognito logout URLs, and the API's
+    # CORS allow-list — so adding the Amplify URL is a single edit here. See
+    # docs/amplify-deploy.md for the deploy order (the URL only exists after the
+    # first Amplify build, so Auth + Api get redeployed once it's known).
+    hosting_urls: list[str] = field(default_factory=list)
 
     @property
     def cors_origins(self) -> str:
-        return self.app_base_url
+        # The API's FMAJ_CORS_ORIGINS. Local dev origin plus every deployed origin.
+        return ",".join([self.app_base_url, *self.hosting_urls])
 
     @property
     def callback_urls(self) -> list[str]:
-        return [f"{self.app_base_url}/auth/callback", *self.extra_callback_urls]
+        return [
+            f"{self.app_base_url}/auth/callback",
+            *[f"{h}/auth/callback" for h in self.hosting_urls],
+            *self.extra_callback_urls,
+        ]
 
     @property
     def logout_urls(self) -> list[str]:
-        return [self.app_base_url]
+        return [self.app_base_url, *self.hosting_urls]
 
     # SSM param holding the (non-secret) Google OAuth client id
     @property

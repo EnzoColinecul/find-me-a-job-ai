@@ -1,7 +1,9 @@
 """Company discovery: location + radius + roles -> deduped, capped candidate list.
 
 Pipeline per search:
-  1. For each role: Nearby Search per mapped type-group + optional Text Search.
+  1. For each role: one Nearby Search PER mapped type (see the note at the call
+     site — Nearby caps at 20 per request with no pagination, so bundling the
+     types into one call caps the whole search at 20) + optional Text Search.
   2. Merge, dedupe by place_id, filter to radius (text results can drift outside).
   3. Rank by distance, cap at MAX_COMPANIES.
   4. Place Details (Enterprise fields) for the capped list only -> websiteUri.
@@ -10,13 +12,16 @@ import logging
 import math
 from dataclasses import dataclass, field
 
-from fmaj_agent import mapping
+from fmaj_agent import config, mapping
 from fmaj_agent.models import Company, RoleSpec
 from fmaj_agent.places import PlacesClient
 
 logger = logging.getLogger(__name__)
 
-MAX_COMPANIES = 40
+#: Ceiling regardless of configuration: Place Details is the Enterprise SKU
+#: (1K/month) and one search must never be able to eat the monthly quota.
+#: `FMAJ_MAX_COMPANIES=0` means "no PoC limit", not "no limit at all".
+HARD_MAX_COMPANIES = 40
 
 
 @dataclass
@@ -65,9 +70,14 @@ def discover(
     radius_km: float,
     roles: list,
     client: PlacesClient | None = None,
-    max_companies: int = MAX_COMPANIES,
+    max_companies: int | None = None,
     fetch_details: bool = True,
 ) -> DiscoveryResult:
+    # None -> use the configured budget; 0 there means "unlimited", which still
+    # means HARD_MAX_COMPANIES because Place Details costs real money per call.
+    if max_companies is None:
+        max_companies = config.MAX_COMPANIES or HARD_MAX_COMPANIES
+    max_companies = min(max_companies, HARD_MAX_COMPANIES)
     client = client or PlacesClient()
     radius_m = radius_km * 1000
     candidates: dict[str, dict] = {}
@@ -80,8 +90,23 @@ def discover(
         if not plan.curated and spec.label != spec.mapping_key:
             plan = mapping.resolve(spec.label)
         raw: list[dict] = []
-        if plan.types:
-            raw.extend(client.search_nearby(lat, lng, radius_m, list(plan.types)))
+        # ONE CALL PER TYPE, not one call with every type in it.
+        #
+        # Nearby Search (New) returns at most 20 places and has no pagination, so
+        # a single bundled call is a hard ceiling of 20 candidates no matter how
+        # big the radius or how many types are asked for. In Melbourne CBD at 5km
+        # that produced 20 — which then had to cover a MAX_COMPANIES of 40.
+        #
+        # Splitting also improves the *mix*: `rankPreference: DISTANCE` on a
+        # bundled call can return 20 restaurants and no bakeries, whereas per
+        # type it returns the 20 nearest of each.
+        #
+        # Affordable because these are the Pro SKU (5K/month free) and the type
+        # lists are short. Place Details — the Enterprise SKU, 1K/month — is
+        # still only called for the shortlist, so this doesn't touch the
+        # expensive half of discovery.
+        for place_type in plan.types:
+            raw.extend(client.search_nearby(lat, lng, radius_m, [place_type]))
         if plan.text_query:
             raw.extend(client.search_text(plan.text_query, lat, lng, radius_m))
         for place in raw:
@@ -120,6 +145,8 @@ def discover(
                 types=cand["types"],
                 website=website,
                 roles=cand["roles"],
+                lat=cand["lat"],
+                lng=cand["lng"],
             )
         )
 

@@ -1,31 +1,205 @@
-:root {
-  --bg: #ffffff;
-  --fg: #171717;
+@import "tailwindcss";
+
+/*
+ * Find Me A Job AI — design tokens.
+ * Source of truth: design/DESIGN-SPEC.md (extracted from the mockups).
+ *
+ * The design is LIGHT-NATIVE. There is no dark mode in V1 — the paper/cream
+ * direction has no designed dark counterpart, so we opt out explicitly rather
+ * than let the browser invent one. Revisit post-beta.
+ *
+ * Rule: no hardcoded hex outside this file. Use the generated utilities
+ * (bg-paper, text-ink, border-line, …) or var(--color-*) where a utility
+ * doesn't exist.
+ */
+
+@theme {
+  /* ---- Surfaces ---------------------------------------------------- */
+  --color-paper: #f6f5f2; /* app background */
+  --color-paper-deep: #f2f0e9; /* map base / recessed paper */
+  --color-surface: #fffdf7; /* cards, panels */
+  --color-surface-plain: #ffffff; /* login card, floating white sheets */
+
+  /* ---- Workspace rail (mockups 3 & 4) ------------------------------ */
+  --color-rail: #fafaf8; /* left rail background */
+  --color-rail-line: #ecebe6; /* rail border + dividers */
+  --color-rail-active: #eceae4; /* selected recent-search row */
+  --color-rail-muted: #a9a69c; /* rail section labels, meta */
+
+  /* ---- Lines ------------------------------------------------------- */
+  --color-line: #ddd6c2; /* hairlines, card borders */
+  --color-line-soft: #e6e0cf; /* inner dividers */
+  --color-line-plain: #e2e4e8; /* borders on plain white */
+  --color-line-cool: #e6e8eb; /* borders on floating white panels */
+
+  /* ---- Text -------------------------------------------------------- */
+  /*
+   * Contrast note (see the Phase 6 "Design QA pass" card):
+   *   ink-muted    #8b8574 on surface — ~3.4:1. BELOW WCAG AA for body text.
+   *   slate-faint  #9aa1ab on white   — ~2.8:1. BELOW AA for body text.
+   * Both are fine for large (>=18.66px bold / 24px) or decorative text only —
+   * map street labels, fine print set at >=18px, and so on. For body copy use
+   * `slate-muted` (~5.7:1 on white) or `ink`.
+   */
+  --color-ink: #14213d; /* primary text, logo navy */
+  --color-ink-muted: #8b8574; /* map labels, decorative — not body copy */
+  --color-ink-soft: #5b5f68; /* rail rows, quieter body text */
+  --color-slate-muted: #6b7280; /* secondary body text on white */
+  --color-slate-faint: #9aa1ab; /* fine print — large sizes only */
+  --color-slate-strong: #4b5563; /* quick-pick pills over the map */
+
+  /* ---- Accents ----------------------------------------------------- */
+  --color-accent: #3d6fb5; /* primary actions, links */
+  --color-accent-strong: #2f6fed; /* focus / active */
+  --color-pin: #ff5a45; /* map pin, location marker */
+  --color-success: #2fa572; /* found / complete */
+  --color-success-deep: #4f8c62; /* park labels, quiet success */
+  --color-warn: #ff8a3d; /* in progress */
+  --color-warn-deep: #a8541a; /* "Checking" tag text — #ff8a3d fails AA at 10px */
+  --color-chip-pink: #e64f8a;
+  --color-chip-purple: #8a4bd6;
+
+  /* ---- Map fills --------------------------------------------------- */
+  --color-map-park: #cfe8d1;
+  --color-map-park-soft: #d9eeda;
+  --color-map-park-faint: #dceedd;
+  --color-map-water: #a8d7ee;
+  --color-map-block: #f7edd3;
+  --color-map-road: #fffdf7;
+  --color-map-highway: #b9c6d6;
+  --color-map-highway-edge: #a3b2c6;
+  --color-map-rail: #c4c8d1;
+  --color-map-building: #e6e0cf;
+
+  /* ---- Radii ------------------------------------------------------- */
+  --radius-tag: 2px;
+  --radius-card: 8px;
+  --radius-panel: 12px;
+  --radius-float: 16px; /* panels floating over the map */
+  --radius-sheet: 20px;
+  --radius-pill: 999px;
+
+  /* ---- Elevation --------------------------------------------------- */
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-bar: 0 6px 20px rgb(20 30 50 / 0.1); /* floating search bar */
+  --shadow-input: 0 10px 34px rgb(20 30 50 / 0.12); /* home's pill input */
+  --shadow-float: 0 18px 44px rgb(20 30 50 / 0.16); /* the workspace panel */
+  --shadow-sheet: 0 30px 60px rgb(20 30 50 / 0.18); /* the login card */
+  --shadow-pin: 0 10px 20px rgb(255 90 69 / 0.28); /* the Start analysis CTA */
+
+  /* ---- Type -------------------------------------------------------- */
+  /* --font-sans is wired to next/font in layout.tsx via --font-inter. */
+  --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0a0a0a;
-    --fg: #ededed;
+/*
+ * NOTE: there is deliberately no CSS here for `gmp-place-autocomplete`.
+ *
+ * That widget renders into a CLOSED shadow root, so nothing from this file can
+ * reach inside it — not `::part()`, not custom properties. An earlier attempt to
+ * restyle it that way did nothing at all, which is why the field kept Google's
+ * white pill and blue Material focus ring.
+ *
+ * The address field is now our own input driven by the Places Autocomplete Data
+ * API — see `web/src/components/map/AddressInput.tsx`. Don't reintroduce the
+ * widget expecting to style it.
+ */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
+/*
+ * Live agent trace. New steps arrive at the TOP of the list, so they drop in
+ * from slightly above and the ones below slide down to make room — the motion
+ * says "this just happened" rather than "something changed somewhere".
+ * prefers-reduced-motion (below) collapses all of this to nothing.
+ */
+@keyframes traceIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* The dot on the newest row, while work is still happening. */
+@keyframes tracePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--color-accent-strong);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgb(47 111 237 / 0);
+    opacity: 0.85;
+  }
+}
+
+/* Expanding ring over the map centre while a search runs. */
+@keyframes mapPing {
+  from {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+  to {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+/* Slow drift on the decorative street map (StreetMapBackdrop). */
+@keyframes mapPan {
+  0% {
+    transform: translate(-3%, -2%) scale(1.18);
+  }
+  50% {
+    transform: translate(2%, 2%) scale(1.18);
+  }
+  100% {
+    transform: translate(-3%, -2%) scale(1.18);
+  }
+}
+
+/* Opt out of dark mode: the design has no dark counterpart in V1. */
 html {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
   line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
-  color: #2563eb;
+  color: var(--color-accent-strong);
+}
+
+a:hover {
+  color: var(--color-accent);
 }
 
 button {
   cursor: pointer;
+  font-family: inherit;
+}
+
+/* Slow the decorative map drift for users who ask for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

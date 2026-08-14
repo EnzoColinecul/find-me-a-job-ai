@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from fmaj_agent import secrets
+from fmaj_agent import config, secrets
 
 BASE = "https://places.googleapis.com/v1"
 
@@ -20,9 +20,29 @@ class PlacesError(RuntimeError):
 
 
 def _check(resp: httpx.Response) -> httpx.Response:
-    if resp.is_error:
-        raise PlacesError(f"{resp.status_code} {resp.request.url}: {resp.text[:500]}")
-    return resp
+    if not resp.is_error:
+        return resp
+
+    body = resp.text
+    # The single most likely 403 here, and the raw Google payload buries it under
+    # 500 characters of JSON. There are two Places keys — a referrer-restricted
+    # browser one and an unrestricted server one — and putting the browser key
+    # where the server expects one fails exactly like this.
+    if "API_KEY_HTTP_REFERRER_BLOCKED" in body:
+        raise PlacesError(
+            "Places rejected the key: it is HTTP-referrer restricted, so it only "
+            "works from a browser. The pipeline needs the SERVER key (no "
+            "application restriction, Places API (New) only). Whatever supplied "
+            f"the key — FMAJ_PLACES_KEY, or the secret `{config.PLACES_KEY_SECRET}` "
+            "— currently holds the browser key from web/.env.local. Fix with "
+            "scripts/store-external-secrets.sh (blank prompts keep their value)."
+        )
+    if "API_KEY_SERVICE_BLOCKED" in body or "SERVICE_DISABLED" in body:
+        raise PlacesError(
+            "Places rejected the key: Places API (New) is not enabled for it, or "
+            f"the key's API restrictions exclude it. Body: {body[:300]}"
+        )
+    raise PlacesError(f"{resp.status_code} {resp.request.url}: {body[:500]}")
 
 # Pro tier — safe for discovery volume (5K free/mo)
 SEARCH_FIELD_MASK = (

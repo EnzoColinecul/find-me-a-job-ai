@@ -1,8 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { handleCallback } from "@/lib/auth";
+import { Card } from "@/components/ui";
+
+function Signing() {
+  return <p className="m-0 text-sm text-slate-muted">Signing you in…</p>;
+}
 
 function CallbackInner() {
   const router = useRouter();
@@ -27,21 +33,27 @@ function CallbackInner() {
 
   return error ? (
     <>
-      <h1>Sign-in failed</h1>
-      <p style={{ color: "crimson" }}>{error}</p>
-      <a href="/">Back to start</a>
+      <h1 className="m-0 mb-2 text-lg font-bold text-ink">Sign-in failed</h1>
+      <p role="alert" className="m-0 mb-4 text-sm text-pin">
+        {error}
+      </p>
+      <Link href="/" className="text-sm font-semibold">
+        Back to start
+      </Link>
     </>
   ) : (
-    <p>Signing you in…</p>
+    <Signing />
   );
 }
 
 export default function AuthCallback() {
   return (
-    <main style={{ maxWidth: 640, margin: "4rem auto", padding: "0 1rem" }}>
-      <Suspense fallback={<p>Signing you in…</p>}>
-        <CallbackInner />
-      </Suspense>
+    <main className="flex min-h-dvh items-center justify-center px-5">
+      <Card className="w-full max-w-100 px-7 py-8 text-center">
+        <Suspense fallback={<Signing />}>
+          <CallbackInner />
+        </Suspense>
+      </Card>
     </main>
   );
 }

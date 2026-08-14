@@ -1,0 +1,27 @@
+# AWS Amplify Hosting build spec (monorepo — the Next.js app lives in web/).
+#
+# Amplify auto-detects Next.js and runs it on the SSR "Web Compute" platform, so
+# no `output: 'export'` is needed and API routes / SSR keep working. The four
+# NEXT_PUBLIC_* build-time vars are set in the Amplify console (App settings →
+# Environment variables), NOT here — they include keys and must not be committed.
+# See docs/amplify-deploy.md for the full runbook.
+version: 1
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        # Next.js SSR on Amplify emits to .next; Amplify packages it for Web Compute.
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*
