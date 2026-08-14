@@ -181,7 +181,29 @@ def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) ->
     return stopped
 
 
-# TODO(Phase 4): GET /searches/{search_id}/report — presigned PDF URL.
+@app.get("/searches/{search_id}/report")
+def get_report_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+    """A presigned URL to the search's PDF report.
+
+    The PDF is a snapshot, so it only exists for a finished search — a running
+    one gets 409 rather than a report that disagrees with the next poll. The
+    object is cached in S3, so the second download of the same search re-presigns
+    rather than re-rendering.
+    """
+    from app.reports import ReportNotReady, get_report_url
+
+    try:
+        report = get_report_url(user.sub, search_id)
+    except ReportNotReady:
+        raise api_error(
+            409,
+            "report_not_ready",
+            "This search hasn't finished yet — give it a moment, then try again.",
+        ) from None
+    if report is None:
+        raise api_error(404, "not_found", "We couldn't find that search.")
+    return report
+
 
 # Lambda entrypoint
 handler = Mangum(app)

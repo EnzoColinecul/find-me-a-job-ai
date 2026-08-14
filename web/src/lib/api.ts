@@ -211,3 +211,16 @@ export async function getSearch(searchId: string): Promise<Search> {
   if (!resp.ok) await fail(resp, "Couldn't load that search");
   return resp.json();
 }
+
+/**
+ * A presigned URL to the search's PDF report. 409 (`report_not_ready`) if the
+ * search hasn't finished — the report is a snapshot, so the caller only offers
+ * this once the search is terminal.
+ */
+export async function getReportUrl(
+  searchId: string,
+): Promise<{ url: string; expires_in: number }> {
+  const resp = await authed(`/searches/${searchId}/report`);
+  if (!resp.ok) await fail(resp, "Couldn't build your report");
+  return resp.json();
+}

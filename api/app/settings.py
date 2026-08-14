@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     aws_region: str = "ap-southeast-2"
     aws_profile: str = ""  # local dev only; empty in Lambda (role creds)
     table_name: str = "fmaj-test-main"
-    reports_bucket: str = "fmaj-test-reports"
+    # Matches the CDK-created bucket (data_stack: fmaj-{stage}-reports-<acct>).
+    # Override per stage via FMAJ_REPORTS_BUCKET.
+    reports_bucket: str = "fmaj-test-reports-418862088910"
     cognito_user_pool_id: str = ""
     cognito_client_id: str = ""
     state_machine_arn: str = ""
