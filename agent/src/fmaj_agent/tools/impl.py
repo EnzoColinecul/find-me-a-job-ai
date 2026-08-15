@@ -4,6 +4,7 @@ Conduct rules (docs/PLAN.md §4): respect robots.txt, honest User-Agent, short
 timeouts, a few pages per site, never bypass logins/captchas. Seek/LinkedIn are
 never scraped — only linked to via web_search.
 """
+
 import re
 import urllib.robotparser
 from urllib.parse import urljoin, urlparse
@@ -42,9 +43,9 @@ def _allowed(url: str) -> bool:
         if root not in _robot_cache:
             rp = None
             try:
-                resp = httpx.get(f"{root}/robots.txt", timeout=5,
-                                 headers={"User-Agent": USER_AGENT},
-                                 follow_redirects=True)
+                resp = httpx.get(
+                    f"{root}/robots.txt", timeout=5, headers={"User-Agent": USER_AGENT}, follow_redirects=True
+                )
                 if resp.status_code == 200:
                     parser = urllib.robotparser.RobotFileParser()
                     parser.parse(resp.text.splitlines())
@@ -109,15 +110,32 @@ def find_careers_link(url: str) -> ToolResult:
 #: segment (`/v1/api/jobs/{country}/search/1`), so an unsupported one is a 404,
 #: not an empty result set — we check before spending the call.
 #: Source: https://developer.adzuna.com/overview (verified 2026-08-15).
-ADZUNA_COUNTRIES = frozenset({
-    "at", "au", "be", "br", "ca", "ch", "de", "es", "fr", "gb",
-    "in", "it", "mx", "nl", "nz", "pl", "sg", "us", "za",
-})
+ADZUNA_COUNTRIES = frozenset(
+    {
+        "at",
+        "au",
+        "be",
+        "br",
+        "ca",
+        "ch",
+        "de",
+        "es",
+        "fr",
+        "gb",
+        "in",
+        "it",
+        "mx",
+        "nl",
+        "nz",
+        "pl",
+        "sg",
+        "us",
+        "za",
+    }
+)
 
 
-def search_jobs_adzuna(
-    company: str, role: str, country_code: str | None = None
-) -> ToolResult:
+def search_jobs_adzuna(company: str, role: str, country_code: str | None = None) -> ToolResult:
     """Official Adzuna API job search for one company, in that company's country.
 
     `country_code` is ISO-3166 alpha-2, taken from the Places result for this
@@ -138,7 +156,7 @@ def search_jobs_adzuna(
         return ToolResult(
             ok=False,
             reason=f"Adzuna has no job index for {country.upper()} — try the "
-                   "company's own site, or web_search as a last resort",
+            "company's own site, or web_search as a last resort",
         )
     try:
         app_id, app_key = secrets.adzuna_credentials()
@@ -206,8 +224,8 @@ def _seek_company_slug(company: str) -> str:
     """
     s = company.strip().replace("&", " and ")
     s = _SEEK_SUFFIX_RE.sub("", s).strip()
-    s = re.sub(r"[^0-9A-Za-z\s-]", "", s)      # keep alphanumerics, space, hyphen
-    s = re.sub(r"[\s-]+", "-", s).strip("-")   # runs of space/hyphen -> one hyphen
+    s = re.sub(r"[^0-9A-Za-z\s-]", "", s)  # keep alphanumerics, space, hyphen
+    s = re.sub(r"[\s-]+", "-", s).strip("-")  # runs of space/hyphen -> one hyphen
     return s
 
 

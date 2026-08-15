@@ -8,19 +8,36 @@ Each handler writes to DynamoDB incrementally so the frontend's polling endpoint
 """
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import boto3
 
+from fmaj_agent import config
+from fmaj_agent.budget import DynamoSearchBudget
 from fmaj_agent.discovery import discover
 from fmaj_agent.models import Company
 from fmaj_agent.orchestrator import investigate
+from fmaj_agent.trace import Tag, TraceStep
 
 logger = logging.getLogger(__name__)
 logging.getLogger().setLevel(logging.INFO)
 
 TABLE_NAME = os.environ.get("FMAJ_TABLE_NAME", "fmaj-test-main")
 AWS_REGION = os.environ.get("FMAJ_AWS_REGION", "ap-southeast-2")
+
+#: Trace rows are live progress, not a record of the search. 7 days is long
+#: enough to debug a run and short enough that we're not sitting on Places data.
+#: Requires TTL enabled on `expires_at` for the table (see infra/data_stack).
+STEP_TTL_SECONDS = 7 * 24 * 3600
+
+#: Map-pin coordinates are the one piece of Places data we now persist beyond the
+#: search, so they live on their own PIN# item with a TTL rather than on the
+#: durable RESULT# row. CLAUDE.md: "don't persist place data beyond the search
+#: (place_id is exempt)" — keying by the exempt place_id and expiring the lat/lng
+#: keeps the coordinates from outliving the search, while the result cards (which
+#: the user came back for) are left untouched. 7 days matches the trace rows.
+PIN_TTL_SECONDS = 7 * 24 * 3600
 
 _table = None
 
@@ -34,6 +51,35 @@ def _get_table():
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _put_step(search_id: str, step: TraceStep) -> None:
+    """Persist one trace row so the UI can show it while the search is running.
+
+    Sort key is the ISO timestamp, which sorts chronologically as a string; the
+    place_id suffix keeps two companies that emit in the same microsecond from
+    colliding. Companies are investigated in parallel, so a per-run sequence
+    number would not give a meaningful global order.
+
+    Steps carry a TTL: they are progress, not a record. Keeping them forever
+    would also mean holding Places-derived company names indefinitely, which the
+    Places terms don't allow.
+
+    **This never raises.** The trace is a view onto the work, not the work — a
+    throttled write or a missing table must not be able to fail a real search.
+    The orchestrator's sink is already wrapped, but `discover_handler` calls this
+    directly, so the guarantee belongs here too.
+    """
+    try:
+        _get_table().put_item(Item={
+            "PK": f"SEARCH#{search_id}",
+            "SK": f"STEP#{step.at}#{step.place_id or 'x'}",
+            **step.to_item(),
+            "expires_at": int(time.time()) + STEP_TTL_SECONDS,
+        })
+    except Exception:  # noqa: BLE001
+        logger.warning("could not record trace step %s for %s",
+                       step.tool, search_id, exc_info=True)
 
 
 def discover_handler(event: dict, _context=None) -> dict:
@@ -67,12 +113,33 @@ def discover_handler(event: dict, _context=None) -> dict:
             "links": [],
             "emails": [],
         })
+        # Coordinates go on a separate, expiring PIN# item — see PIN_TTL_SECONDS.
+        # Stored as strings to match the META lat/lng and avoid DynamoDB's
+        # float/Decimal handling; get_search parses them back. A company with no
+        # coordinates simply gets no pin.
+        if company.lat is not None and company.lng is not None:
+            table.put_item(Item={
+                "PK": f"SEARCH#{search_id}",
+                "SK": f"PIN#{company.place_id}",
+                "lat": str(company.lat),
+                "lng": str(company.lng),
+                "expires_at": int(time.time()) + PIN_TTL_SECONDS,
+            })
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET company_count = :c, discovery_stats = :st",
         ExpressionAttributeValues={":c": len(result.companies),
                                    ":st": {k: str(v) for k, v in result.stats.items()}},
     )
+    logger.info("search %s budgets: %s", search_id, config.budget_summary())
+    n = len(result.companies)
+    # roles arrive as RoleSpec dicts, or plain strings on older searches
+    labels = [r["label"] if isinstance(r, dict) else str(r) for r in event["roles"]]
+    _put_step(search_id, TraceStep(
+        tag=Tag.SEARCHING, tool="discovery",
+        text=", ".join(labels[:2]) or "nearby businesses",
+        meta=f"{n} place{'s' if n != 1 else ''} found",
+    ))
     logger.info("search %s: discovered %d companies %s",
                 search_id, len(result.companies), result.stats)
     return {
@@ -85,7 +152,17 @@ def investigate_handler(event: dict, _context=None) -> dict:
     """Input (one Map item): {search_id, company: {...}}. Writes the RESULT# item."""
     search_id = event["search_id"]
     company = Company(**event["company"])
-    run = investigate(company)  # never raises
+    # Steps are written as they happen, so the panel fills in while the Map
+    # state is still running rather than all at once at the end.
+    #
+    # The budget is what lets MAX_COMPANIES be a product decision again: every
+    # Lambda under this search spends against one counter, so raising the number
+    # of companies no longer multiplies the SerpAPI bill.
+    run = investigate(
+        company,
+        on_step=lambda s: _put_step(search_id, s),
+        budget=DynamoSearchBudget(search_id, table=_get_table()),
+    )
     f = run.findings
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
@@ -102,9 +179,10 @@ def investigate_handler(event: dict, _context=None) -> dict:
             ":t": _now(),
         },
     )
-    logger.info("search %s / %s -> %s (tools=%d tokens=%d/%d)",
+    logger.info("search %s / %s -> %s (tools=%d web_search=%d tokens=%d/%d)",
                 search_id, company.name, f.opportunity_type.value,
-                run.tool_calls, run.input_tokens, run.output_tokens)
+                run.tool_calls, run.metered_calls.get("web_search", 0),
+                run.input_tokens, run.output_tokens)
     return {"place_id": company.place_id, "opportunity_type": f.opportunity_type.value}
 
 

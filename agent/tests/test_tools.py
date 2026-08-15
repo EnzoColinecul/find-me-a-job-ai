@@ -157,7 +157,11 @@ def test_seek_company_page_returns_url_when_it_has_vacancies() -> None:
                  '<div data-automation="jobTitle">C</div>',
         )
     )
+<<<<<<< HEAD
     r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
+=======
+    r = impl.find_seek_company_page("Virtual IT Group")
+>>>>>>> feat/design-system-and-login
     assert r.ok
     assert r.data["url"] == url
     assert r.data["job_count"] == 3
@@ -177,7 +181,11 @@ def test_seek_company_page_with_no_results_is_rejected() -> None:
             200, html="<h1>No matching search results</h1>" + "<div>filler</div>" * 500
         )
     )
+<<<<<<< HEAD
     r = impl.find_seek_company_page("Boxtech", country_code="au")
+=======
+    r = impl.find_seek_company_page("Boxtech")
+>>>>>>> feat/design-system-and-login
     assert not r.ok
     assert "no current listings" in r.reason
 
@@ -190,7 +198,11 @@ def test_seek_company_page_fails_closed_when_markers_are_missing() -> None:
     respx.get("https://au.seek.com/Redesigned-Co-jobs/at-this-company").mock(
         return_value=httpx.Response(200, html="<main>totally new markup</main>")
     )
+<<<<<<< HEAD
     r = impl.find_seek_company_page("Redesigned Co", country_code="au")
+=======
+    r = impl.find_seek_company_page("Redesigned Co")
+>>>>>>> feat/design-system-and-login
     assert not r.ok
     assert "could not confirm" in r.reason
 
@@ -202,7 +214,11 @@ def test_seek_company_page_404_is_not_raised() -> None:
     respx.get("https://au.seek.com/Ghost-Co-jobs/at-this-company").mock(
         return_value=httpx.Response(404)
     )
+<<<<<<< HEAD
     r = impl.find_seek_company_page("Ghost Co", country_code="au")
+=======
+    r = impl.find_seek_company_page("Ghost Co")
+>>>>>>> feat/design-system-and-login
     assert not r.ok and "404" in r.reason
 
 
@@ -213,6 +229,10 @@ def test_seek_company_page_respects_robots() -> None:
     respx.get("https://au.seek.com/robots.txt").mock(
         return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
     )
+<<<<<<< HEAD
     r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
+=======
+    r = impl.find_seek_company_page("Virtual IT Group")
+>>>>>>> feat/design-system-and-login
     assert not r.ok
     assert "robots" in r.reason

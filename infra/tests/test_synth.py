@@ -18,3 +18,28 @@ def test_stages_synth() -> None:
     types = [r["Type"] for r in pipeline.values()]
     assert "AWS::StepFunctions::StateMachine" in types
     assert types.count("AWS::Lambda::Function") >= 4  # discover/investigate/aggregate/fail
+
+    # Api stack: HTTP API proxying a Mangum Lambda, with the search cap + CORS
+    # origins wired through as env vars, and StopExecution granted (start alone
+    # would 403 the Stop endpoint).
+    api = stacks["Fmaj-Test-Api"].template["Resources"]
+    api_types = [r["Type"] for r in api.values()]
+    assert "AWS::ApiGatewayV2::Api" in api_types
+    # (log_retention adds a helper Lambda, so match ours by its Mangum handler)
+    fns = [
+        r for r in api.values()
+        if r["Type"] == "AWS::Lambda::Function"
+        and r["Properties"].get("Handler") == "app.main.handler"
+    ]
+    assert len(fns) == 1
+    env = fns[0]["Properties"]["Environment"]["Variables"]
+    assert env["FMAJ_GLOBAL_MONTHLY_SEARCHES"] == str(TEST.monthly_search_cap)
+    assert env["FMAJ_CORS_ORIGINS"] == TEST.cors_origins
+    actions = [
+        stmt["Action"]
+        for res in api.values()
+        if res["Type"] == "AWS::IAM::Policy"
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]
+    ]
+    flat = [a for act in actions for a in (act if isinstance(act, list) else [act])]
+    assert "states:StopExecution" in flat and "states:StartExecution" in flat

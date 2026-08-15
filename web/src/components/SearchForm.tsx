@@ -1,14 +1,5 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import {
-  APIProvider,
-  Map,
-  AdvancedMarker,
-  useMap,
-  useMapsLibrary,
-} from "@vis.gl/react-google-maps";
-import { useRouter } from "next/navigation";
 import {
   createSearch,
   getConfig,
@@ -17,6 +8,15 @@ import {
   type RoleSuggestion,
 } from "@/lib/api";
 import { CURATED_ROLES } from "@/lib/roles";
+import {
+  AdvancedMarker,
+  APIProvider,
+  Map,
+  useMap,
+  useMapsLibrary,
+} from "@vis.gl/react-google-maps";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 const MAPS_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY!;
 const SYDNEY = { lat: -33.8688, lng: 151.2093 };
@@ -24,7 +24,13 @@ const SYDNEY = { lat: -33.8688, lng: 151.2093 };
 type LatLng = { lat: number; lng: number };
 
 /** Draws the radius circle around the selected point. */
-function RadiusCircle({ center, radiusKm }: { center: LatLng; radiusKm: number }) {
+function RadiusCircle({
+  center,
+  radiusKm,
+}: {
+  center: LatLng;
+  radiusKm: number;
+}) {
   const map = useMap();
   const circleRef = useRef<google.maps.Circle | null>(null);
 
@@ -98,7 +104,9 @@ export default function SearchForm() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    getConfig().then(setConfig).catch(() => setConfig(null));
+    getConfig()
+      .then(setConfig)
+      .catch(() => setConfig(null));
   }, []);
 
   const maxRoles = config?.max_roles ?? 1;
@@ -144,7 +152,10 @@ export default function SearchForm() {
       const list = prev ?? [];
       return list.some((r) => r.label === role)
         ? list
-        : [...list, { label: role, curated_key: role, why: "You picked this one." }];
+        : [
+            ...list,
+            { label: role, curated_key: role, why: "You picked this one." },
+          ];
     });
     toggleSelected(role);
   };
@@ -204,7 +215,10 @@ export default function SearchForm() {
         </label>
 
         <div>
-          <label htmlFor="what" style={{ display: "block", marginBottom: "0.3rem" }}>
+          <label
+            htmlFor="what"
+            style={{ display: "block", marginBottom: "0.3rem" }}
+          >
             What kind of work are you looking for?
           </label>
           <textarea
@@ -213,8 +227,12 @@ export default function SearchForm() {
             onChange={(e) => setText(e.target.value)}
             placeholder="e.g. I'd like to work in a restaurant — I've done some kitchen work before"
             rows={3}
-            style={{ width: "100%", padding: "0.6rem", fontSize: "1rem",
-                     fontFamily: "inherit" }}
+            style={{
+              width: "100%",
+              padding: "0.6rem",
+              fontSize: "1rem",
+              fontFamily: "inherit",
+            }}
           />
           <button
             type="button"
@@ -222,7 +240,11 @@ export default function SearchForm() {
             disabled={interpreting || !text.trim()}
             style={{ marginTop: "0.4rem", padding: "0.5rem 0.9rem" }}
           >
-            {interpreting ? "Thinking…" : suggestions ? "Re-interpret" : "Continue"}
+            {interpreting
+              ? "Thinking…"
+              : suggestions
+                ? "Re-interpret"
+                : "Continue"}
           </button>
         </div>
 
@@ -277,8 +299,14 @@ export default function SearchForm() {
               <summary style={{ cursor: "pointer", color: "#888" }}>
                 Or pick a common role
               </summary>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem",
-                            marginTop: "0.4rem" }}>
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.4rem",
+                  marginTop: "0.4rem",
+                }}
+              >
                 {CURATED_ROLES.filter(
                   (r) => !suggestions.some((s) => s.label === r),
                 ).map((role) => (
@@ -287,9 +315,13 @@ export default function SearchForm() {
                     type="button"
                     onClick={() => addCurated(role)}
                     style={{
-                      padding: "0.3rem 0.6rem", borderRadius: 999,
-                      border: "1px dashed #999", background: "transparent",
-                      color: "inherit", cursor: "pointer", fontSize: "0.9rem",
+                      padding: "0.3rem 0.6rem",
+                      borderRadius: 999,
+                      border: "1px dashed #999",
+                      background: "transparent",
+                      color: "inherit",
+                      cursor: "pointer",
+                      fontSize: "0.9rem",
                     }}
                   >
                     + {role}

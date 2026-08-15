@@ -8,6 +8,7 @@ Pipeline per search:
   3. Rank by distance, cap at MAX_COMPANIES.
   4. Place Details (Enterprise fields) for the capped list only -> websiteUri.
 """
+
 import logging
 import math
 from dataclasses import dataclass, field

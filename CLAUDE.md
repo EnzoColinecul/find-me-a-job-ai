@@ -10,7 +10,7 @@ hospitality/retail/trades — Places is weak for office roles. Full plan:
 bounding box in `SearchRequest` and `includedRegionCodes: ["au"]` on the address
 autocomplete; both are gone so the private beta can be tested from any country.
 Nothing gates on geography any more — gate on plan/quota instead. What remains
-country-specific is *job-board coverage*, and it is now data, not an assumption:
+country-specific is _job-board coverage_, and it is now data, not an assumption:
 discovery reads the ISO country off the Places address components onto
 `Company.country_code`, the orchestrator binds that into the tool dispatch, and
 each board tool decides for itself (Adzuna picks its national index, Seek refuses
@@ -70,6 +70,7 @@ scripts/ store-external-secrets.sh (Secrets Manager registration)
 ## LLM provider (agent)
 
 Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/providers.py`).
+
 - **Currently using `gemini`** (`gemini-3.6-flash` on Vertex, GCP credits). Needs
   `GOOGLE_APPLICATION_CREDENTIALS` pointing at the SA key. Gemini 3 requires echoing
   `thought_signature` on function-call parts — handled in GeminiProvider.
@@ -139,7 +140,7 @@ venues instead of Text-Searching appliance stores. Falls back to the raw text as
 role if the LLM output is unusable.
 
 **`max_roles` is one knob** (`api/app/settings.py`, PoC = 1). The API validates against
-it and the frontend *fetches* it from `GET /config` — raising it for subscriptions needs
+it and the frontend _fetches_ it from `GET /config` — raising it for subscriptions needs
 no code change. Never hardcode role/radius limits in the frontend.
 
 ## Design (mockups landed 2026-08-04)
@@ -195,7 +196,7 @@ Screen flow lives in `web/src/app/page.tsx`: signed out → `LoginScreen`, signe
 with no interpreted roles → `HomeScreen`, roles interpreted → `Workspace`.
 
 **`WorkspaceShell` is the shell for both `/` and `/search/{id}`** (rail | map |
-optional right column). Mockup 4 is mockup 3 with a third pane — results are *not*
+optional right column). Mockup 4 is mockup 3 with a third pane — results are _not_
 a separate page, the map stays on screen. The right column renders only when there
 are findings; in-flight/empty/failed searches show the status pill over the map
 instead of an empty gutter.
