@@ -105,12 +105,45 @@ def find_careers_link(url: str) -> ToolResult:
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
 
 
-def search_jobs_adzuna(company: str, role: str, location: str = "australia") -> ToolResult:
-    """Official Adzuna API job search, scoped to AU and the company name."""
+#: Countries Adzuna publishes a job index for. The API takes the code as a PATH
+#: segment (`/v1/api/jobs/{country}/search/1`), so an unsupported one is a 404,
+#: not an empty result set — we check before spending the call.
+#: Source: https://developer.adzuna.com/overview (verified 2026-08-15).
+ADZUNA_COUNTRIES = frozenset({
+    "at", "au", "be", "br", "ca", "ch", "de", "es", "fr", "gb",
+    "in", "it", "mx", "nl", "nz", "pl", "sg", "us", "za",
+})
+
+
+def search_jobs_adzuna(
+    company: str, role: str, country_code: str | None = None
+) -> ToolResult:
+    """Official Adzuna API job search for one company, in that company's country.
+
+    `country_code` is ISO-3166 alpha-2, taken from the Places result for this
+    company (see `discovery._country_code`) — NOT chosen by the model. It used to
+    be hardcoded to `au`, which meant a search run from London queried the
+    Australian index and always came back empty.
+
+    Unknown or unsupported country -> a refusal the model can read and route
+    around, never a silent wrong-country query. The trace shows it as `Skipping`.
+    """
+    country = (country_code or "").strip().lower()
+    if not country:
+        return ToolResult(
+            ok=False,
+            reason="no country known for this company — cannot pick a job index",
+        )
+    if country not in ADZUNA_COUNTRIES:
+        return ToolResult(
+            ok=False,
+            reason=f"Adzuna has no job index for {country.upper()} — try the "
+                   "company's own site, or web_search as a last resort",
+        )
     try:
         app_id, app_key = secrets.adzuna_credentials()
         resp = httpx.get(
-            "https://api.adzuna.com/v1/api/jobs/au/search/1",
+            f"https://api.adzuna.com/v1/api/jobs/{country}/search/1",
             params={
                 "app_id": app_id,
                 "app_key": app_key,
@@ -134,6 +167,108 @@ def search_jobs_adzuna(company: str, role: str, location: str = "australia") -> 
             for j in results
         ]
         return ToolResult(ok=True, data={"jobs": jobs})
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+
+
+SEEK_COMPANY_URL = "https://au.seek.com/{slug}-jobs/at-this-company"
+
+#: Seek's employer pages only cover Australian employers, and the robots.txt
+#: analysis behind the one deliberate fetch exception (CLAUDE.md § LLM provider)
+#: was done against `au.seek.com` specifically. Calling it for a company in
+#: another country is a wasted tool call at best and a wrong link at worst, so
+#: the tool refuses outside AU rather than guessing at a sibling domain. Adding
+#: `nz.seek.co.nz` would need its own robots.txt check first — don't assume.
+SEEK_COUNTRIES = frozenset({"au"})
+
+# Trailing legal suffixes Seek usually omits from its employer-page slugs.
+_SEEK_SUFFIX_RE = re.compile(
+    r"[\s,]*\b(pty\.?\s*ltd\.?|pty\.?\s*limited|limited|ltd\.?|inc\.?|llc|corp\.?)\s*$",
+    re.I,
+)
+
+# Seek server-renders its employer pages, so one GET distinguishes a page with
+# vacancies from an empty one WITHOUT executing JavaScript. Verified 2026-08-11:
+#   Boxtech          -> 515,079 bytes, "No matching search results" x1, jobTitle x0
+#   Virtual-IT-Group -> 565,218 bytes, "No matching search results" x0, jobTitle x3
+_SEEK_JOB_MARKER = re.compile(r'data-automation="jobTitle"')
+_SEEK_EMPTY_MARKER = re.compile(r"No matching search results", re.I)
+
+
+def _seek_company_slug(company: str) -> str:
+    """Slugify a company name into Seek's employer-page format.
+
+    Seek employer pages look like ``au.seek.com/Virtual-IT-Group-jobs/at-this-company``:
+    words joined by single hyphens, ``&`` spelled "and", trailing legal suffixes
+    (Pty Ltd, Ltd, …) dropped, other punctuation removed. Best-effort only — the URL
+    is always validated to resolve before we trust it, so an imperfect slug just
+    means we fall back rather than surface a wrong link.
+    """
+    s = company.strip().replace("&", " and ")
+    s = _SEEK_SUFFIX_RE.sub("", s).strip()
+    s = re.sub(r"[^0-9A-Za-z\s-]", "", s)      # keep alphanumerics, space, hyphen
+    s = re.sub(r"[\s-]+", "-", s).strip("-")   # runs of space/hyphen -> one hyphen
+    return s
+
+
+def find_seek_company_page(company: str, country_code: str | None = None) -> ToolResult:
+    """Return Seek's employer listings page for a company ONLY if it has vacancies.
+
+    Australia only — see `SEEK_COUNTRIES`. `country_code` comes from the Places
+    result for this company, not from the model; anything else refuses up front
+    so an overseas search doesn't spend a tool call on a page that cannot exist.
+
+    Prefers ``au.seek.com/{slug}-jobs/at-this-company`` — Seek's per-employer page —
+    over a blind keyword search, which treats the company name as a search term and
+    surfaces unrelated employers.
+
+    A slug that matches no employer still returns **HTTP 200** with a rendered
+    "No matching search results" page, so status alone proves nothing — an earlier
+    HEAD-only version of this shipped links to empty pages. We therefore require
+    POSITIVE evidence of at least one vacancy before returning a link.
+
+    Conduct: this counts job markers to decide whether to link, and keeps only the
+    count — no titles, descriptions or other listing content are extracted or
+    stored. ``/{slug}-jobs/at-this-company`` carries no ``/job/`` segment and no
+    query string, so Seek's robots.txt permits it for our user-agent; `_allowed`
+    re-checks that at call time and refuses if it ever changes.
+    """
+    country = (country_code or "").strip().lower()
+    if country not in SEEK_COUNTRIES:
+        where = country.upper() if country else "an unknown country"
+        return ToolResult(
+            ok=False,
+            reason=f"Seek covers Australia only — this company is in {where}",
+        )
+    slug = _seek_company_slug(company)
+    if not slug:
+        return ToolResult(ok=False, reason="could not build a Seek slug")
+    url = SEEK_COMPANY_URL.format(slug=slug)
+    if not _allowed(url):
+        return ToolResult(ok=False, reason="blocked by robots.txt")
+    try:
+        resp = _get(url)
+        if resp.is_error:
+            return ToolResult(ok=False, reason=f"http {resp.status_code}")
+        if "at-this-company" not in urlparse(str(resp.url)).path:
+            return ToolResult(ok=False, reason="no employer page (redirected to search)")
+        html = resp.text
+        # The empty-state banner wins over any job marker. On the observed empty page
+        # there were none, but if Seek ever adds "similar jobs" cards to it, counting
+        # markers alone would resurrect exactly the bug this guards against.
+        if _SEEK_EMPTY_MARKER.search(html):
+            return ToolResult(ok=False, reason="employer page has no current listings")
+        jobs = len(_SEEK_JOB_MARKER.findall(html))
+        if jobs:
+            return ToolResult(
+                ok=True,
+                data={"url": str(resp.url), "job_count": jobs, "company": company},
+            )
+        # Neither marker: Seek's markup probably changed. Fail CLOSED — surfacing a
+        # link we can't vouch for is the bug this function exists to prevent — but
+        # say so distinctly, so the trace shows a broken detector rather than an
+        # employer that genuinely has no openings.
+        return ToolResult(ok=False, reason="could not confirm listings (markup changed?)")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
 

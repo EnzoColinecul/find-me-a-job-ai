@@ -1,7 +1,9 @@
 """Company discovery: location + radius + roles -> deduped, capped candidate list.
 
 Pipeline per search:
-  1. For each role: Nearby Search per mapped type-group + optional Text Search.
+  1. For each role: one Nearby Search PER mapped type (see the note at the call
+     site — Nearby caps at 20 per request with no pagination, so bundling the
+     types into one call caps the whole search at 20) + optional Text Search.
   2. Merge, dedupe by place_id, filter to radius (text results can drift outside).
   3. Rank by distance, cap at MAX_COMPANIES.
   4. Place Details (Enterprise fields) for the capped list only -> websiteUri.
@@ -10,13 +12,16 @@ import logging
 import math
 from dataclasses import dataclass, field
 
-from fmaj_agent import mapping
+from fmaj_agent import config, mapping
 from fmaj_agent.models import Company, RoleSpec
 from fmaj_agent.places import PlacesClient
 
 logger = logging.getLogger(__name__)
 
-MAX_COMPANIES = 40
+#: Ceiling regardless of configuration: Place Details is the Enterprise SKU
+#: (1K/month) and one search must never be able to eat the monthly quota.
+#: `FMAJ_MAX_COMPANIES=0` means "no PoC limit", not "no limit at all".
+HARD_MAX_COMPANIES = 40
 
 
 @dataclass
@@ -34,6 +39,26 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _country_code(place: dict) -> str | None:
+    """ISO-3166 alpha-2 for a Places result, lowercased ("au", "gb", "us").
+
+    Read off the `country` address component, which the Pro field mask already
+    pays for. This is what makes the search country-aware instead of AU-only:
+    the per-company agent picks its job board from it (see
+    `fmaj_agent.tools.impl.search_jobs_adzuna`).
+
+    Returns None when Google gives no country component — a plus-code-only or
+    unaddressed place. Callers must treat that as "unknown", never as a default
+    country: guessing would send a Sydney cafe's search to a UK job index.
+    """
+    for comp in place.get("addressComponents") or []:
+        if "country" in (comp.get("types") or []):
+            short = (comp.get("shortText") or "").strip()
+            if len(short) == 2 and short.isalpha():
+                return short.lower()
+    return None
+
+
 def _to_candidate(place: dict, roles: list[str]) -> dict:
     return {
         "place_id": place["id"],
@@ -42,8 +67,21 @@ def _to_candidate(place: dict, roles: list[str]) -> dict:
         "types": place.get("types", []),
         "lat": (place.get("location") or {}).get("latitude"),
         "lng": (place.get("location") or {}).get("longitude"),
+        "country_code": _country_code(place),
         "roles": list(roles),
     }
+
+
+def _majority_country(candidates: list[dict]) -> str | None:
+    """The country most of the shortlist sits in, or None if none reported one."""
+    counts: dict[str, int] = {}
+    for cand in candidates:
+        code = cand.get("country_code")
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=lambda c: counts[c])
 
 
 def _as_specs(roles: list) -> list[RoleSpec]:
@@ -65,9 +103,14 @@ def discover(
     radius_km: float,
     roles: list,
     client: PlacesClient | None = None,
-    max_companies: int = MAX_COMPANIES,
+    max_companies: int | None = None,
     fetch_details: bool = True,
 ) -> DiscoveryResult:
+    # None -> use the configured budget; 0 there means "unlimited", which still
+    # means HARD_MAX_COMPANIES because Place Details costs real money per call.
+    if max_companies is None:
+        max_companies = config.MAX_COMPANIES or HARD_MAX_COMPANIES
+    max_companies = min(max_companies, HARD_MAX_COMPANIES)
     client = client or PlacesClient()
     radius_m = radius_km * 1000
     candidates: dict[str, dict] = {}
@@ -80,8 +123,23 @@ def discover(
         if not plan.curated and spec.label != spec.mapping_key:
             plan = mapping.resolve(spec.label)
         raw: list[dict] = []
-        if plan.types:
-            raw.extend(client.search_nearby(lat, lng, radius_m, list(plan.types)))
+        # ONE CALL PER TYPE, not one call with every type in it.
+        #
+        # Nearby Search (New) returns at most 20 places and has no pagination, so
+        # a single bundled call is a hard ceiling of 20 candidates no matter how
+        # big the radius or how many types are asked for. In Melbourne CBD at 5km
+        # that produced 20 — which then had to cover a MAX_COMPANIES of 40.
+        #
+        # Splitting also improves the *mix*: `rankPreference: DISTANCE` on a
+        # bundled call can return 20 restaurants and no bakeries, whereas per
+        # type it returns the 20 nearest of each.
+        #
+        # Affordable because these are the Pro SKU (5K/month free) and the type
+        # lists are short. Place Details — the Enterprise SKU, 1K/month — is
+        # still only called for the shortlist, so this doesn't touch the
+        # expensive half of discovery.
+        for place_type in plan.types:
+            raw.extend(client.search_nearby(lat, lng, radius_m, [place_type]))
         if plan.text_query:
             raw.extend(client.search_text(plan.text_query, lat, lng, radius_m))
         for place in raw:
@@ -102,6 +160,12 @@ def discover(
     ranked.sort(key=lambda c: c["distance_km"])
     shortlist = ranked[:max_companies]
 
+    # One country for the search, from the places nearest the pin. Individual
+    # results can be missing a country component, and a search near a land border
+    # can legitimately straddle two — the majority of the shortlist is a better
+    # answer for those stragglers than dropping their job-board lookup entirely.
+    search_country = _majority_country(shortlist)
+
     # Enterprise details for shortlist ONLY (websiteUri)
     companies: list[Company] = []
     for cand in shortlist:
@@ -120,6 +184,9 @@ def discover(
                 types=cand["types"],
                 website=website,
                 roles=cand["roles"],
+                lat=cand["lat"],
+                lng=cand["lng"],
+                country_code=cand.get("country_code") or search_country,
             )
         )
 
@@ -129,6 +196,10 @@ def discover(
         "within_radius": len(ranked),
         "shortlisted": len(companies),
         "with_website": sum(1 for c in companies if c.website),
+        # Logged so a disappointing overseas search is diagnosable: "no listings"
+        # reads very differently once you can see we resolved the wrong country,
+        # or none at all.
+        "country": search_country or "unknown",
     }
     logger.info("discovery stats: %s", stats)
     return DiscoveryResult(companies=companies, stats=stats)

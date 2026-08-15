@@ -2,9 +2,20 @@
 
 Job search by geolocation: a user picks a location + radius + role(s); Google Places
 finds nearby businesses; an LLM agent investigates each one (careers page → job boards
-→ contact email) and returns a ranked list of opportunities. V1 market: **Australia**
-(hospitality/retail/trades focus — Places is weak for office roles). Full plan:
+→ contact email) and returns a ranked list of opportunities. Focus is
+hospitality/retail/trades — Places is weak for office roles. Full plan:
 `docs/PLAN.md`. Diagram: `docs/architecture.mermaid`.
+
+**Searchable worldwide since 2026-08-15.** V1 was Australia-only, enforced by a
+bounding box in `SearchRequest` and `includedRegionCodes: ["au"]` on the address
+autocomplete; both are gone so the private beta can be tested from any country.
+Nothing gates on geography any more — gate on plan/quota instead. What remains
+country-specific is *job-board coverage*, and it is now data, not an assumption:
+discovery reads the ISO country off the Places address components onto
+`Company.country_code`, the orchestrator binds that into the tool dispatch, and
+each board tool decides for itself (Adzuna picks its national index, Seek refuses
+outside AU). Australia is still the best-covered market; elsewhere the agent leans
+harder on the company's own site. See "LLM provider (agent)" below.
 
 ## Repo layout
 
@@ -45,10 +56,14 @@ scripts/ store-external-secrets.sh (Secrets Manager registration)
   `adzuna` (JSON app_id/app_key), `web-search-key` (SerpAPI). SSM param:
   `/fmaj/{stage}/google-client-id`. Register via `scripts/store-external-secrets.sh`.
 - **Two Google Maps keys, never mix:** a browser key (HTTP-referrer restricted, Maps
-  JS + legacy-free autocomplete via `PlaceAutocompleteElement`) in `web/.env.local`
+  JS + Places Autocomplete Data API — see below) in `web/.env.local`
   as `NEXT_PUBLIC_GOOGLE_MAPS_KEY`; a server key (no app restriction, Places API
   (New) only) in Secrets Manager. A referrer-restricted key from a server returns
-  403 `API_KEY_HTTP_REFERRER_BLOCKED`.
+  403 `API_KEY_HTTP_REFERRER_BLOCKED` — **this has already happened once**
+  (2026-08-04, pasted the browser key while rotating the SerpAPI key). `places.py`
+  now translates that 403 into a message naming the fix, and
+  `store-external-secrets.sh` **keeps a secret unchanged if you leave the prompt
+  blank**, so rotating one key can't clobber another.
 - `fmaj_agent.secrets` resolves keys env-var-first (`FMAJ_PLACES_KEY`,
   `FMAJ_ADZUNA_APP_ID/KEY`, `FMAJ_SERPAPI_KEY`), Secrets Manager second.
 
@@ -61,10 +76,35 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
 - Bedrock (Claude Haiku/Sonnet 4.5 via `au.` inference profiles) is blocked until
   the Anthropic use-case form is approved in the Bedrock console; then it's a drop-in.
 - Orchestrator (`orchestrator.py`): triage → tool loop → `report_findings` (strict
-  JSON), hard budgets in code (8 tool calls / 60s), forced structured report on
-  budget breach, token/cost accounting per run. Tools never raise (ToolResult).
-- Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn** (links
-  only via SerpAPI `site:` queries) — ToS requirement, don't "fix" this.
+  JSON), hard budgets in code (see "Cost discipline" — read off `config` at call
+  time, not copied into module constants), forced structured report on budget
+  breach, token/cost accounting per run. Tools never raise (ToolResult).
+- **Country-aware job boards (2026-08-15).** `Company.country_code` (ISO-3166
+  alpha-2, lowercase) comes from the Places `addressComponents` — Pro tier, so it
+  costs nothing extra; `discovery._country_code` reads it, and a place missing the
+  component inherits the shortlist's majority country. `orchestrator._dispatch_for`
+  binds it into the tool callables, so **the model never passes a country** — a
+  hallucinated `"au"` would put a Berlin bakery back in the Australian index, which
+  is the bug this replaced. `search_jobs_adzuna` routes to
+  `/v1/api/jobs/{country}/search/1` for the ~19 markets in `ADZUNA_COUNTRIES`;
+  `find_seek_company_page` is AU-only (`SEEK_COUNTRIES`). Unknown or uncovered
+  country → `ok=False` with a readable reason the model can route around, shown in
+  the trace as `Skipping` — **never a silent fallback to Australia**. Adding
+  `nz.seek.co.nz` needs its own robots.txt check first; don't assume it mirrors AU.
+- Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn for listing
+  content** (links only via SerpAPI `site:` queries) — ToS requirement, don't "fix"
+  this. **One deliberate exception** (2026-08-11): `find_seek_company_page` GETs
+  `au.seek.com/{slug}-jobs/at-this-company` to count job markers and decide whether
+  the page is worth linking. It keeps only the count — no titles or descriptions —
+  and that path carries no `/job/` segment and no query string, so Seek's robots.txt
+  allows it for our UA (`*/job/`, `*?`, `/graphql`, `/api/jobsearch/` are the
+  disallowed ones). Widening this into reading listings would breach the rule.
+- **Trace (`trace.py`) feeds the "nothing hidden" panel, so it must not lie.**
+  `TOOL_LABELS` is the one place internal names become display names, and every
+  label must name a call we really make (the mockup's `places.details` row is
+  labelled `triage` because that's what runs — a test enforces this). Empty tool
+  results are `Checking`, never `Found`. `investigate(on_step=…)` emits steps; a
+  throwing sink is swallowed — the panel must never fail a search.
 
 ## Commands
 
@@ -85,7 +125,7 @@ aws dynamodb update-item --table-name fmaj-test-main \
   --profile fmaj-deploy --region ap-southeast-2
 ```
 
-Tests: api 10, agent 20 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
+Tests: api 24, agent 56 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
 
@@ -122,12 +162,60 @@ Full mobile set included.
 
 The trace panel's tools map 1:1 onto real ones (`places.nearby`→discovery,
 `fetch_page`→`fetch_url`, `extract_jobs`→careers/Adzuna, `web_search`→SerpAPI,
-`extract_contact`→`extract_emails`), so the backend can emit them — but **steps are
-not persisted mid-flight yet** (only the final `RESULT#`), and recent-searches /
-user-profile data don't exist. Those are the real backend gaps behind the redesign.
+`extract_contact`→`extract_emails`). Steps **are** now persisted mid-flight as
+`STEP#` items, `GET /searches/{id}` returns `steps` + `progress`, and
+`POST /searches/{id}/stop` cancels the execution — so no backend gaps remain
+behind the redesign, only the deploys listed under Phases.
 
 Notion cards live in their own **Phase 5 — UI redesign** (design system → login → home
 → workspace → trace → results → mobile); hardening/beta is now **Phase 6**.
+
+### Frontend styling (decided 2026-08-04 — design-system card, Phase 5)
+
+**Tailwind CSS v4.** Tokens live in one `@theme` block in `web/src/app/globals.css`
+and generate the utilities (`bg-paper`, `bg-surface`, `text-ink`, `text-slate-muted`,
+`border-line`, `rounded-panel`, `shadow-sheet`, the `bg-map-*` fills…). **Never
+hardcode hex outside `globals.css`** — the only sanctioned exceptions are the Google
+brand mark, `viewport.themeColor`, and the Maps `Circle` fallback, each commented
+in place.
+
+**Light-only.** `html { color-scheme: light }` opts out of dark mode; the paper
+direction has no designed dark counterpart. Revisit post-beta.
+
+**Inter** is self-hosted via `next/font/local` from a vendored variable woff2 at
+`web/src/fonts/`. Do not switch to `next/font/google` — it fetches from
+fonts.googleapis.com at build time and makes CI builds network-dependent.
+
+Primitives to reuse rather than re-roll: `web/src/components/ui/` (`Card`, `Pill`,
+`Button`, `TagChip`), `web/src/components/StreetMapBackdrop.tsx`, and
+`web/src/components/map/MapPieces.tsx` (`AddressInput`, `RadiusCircle` — extracted
+when `SearchForm.tsx` was deleted).
+
+Screen flow lives in `web/src/app/page.tsx`: signed out → `LoginScreen`, signed in
+with no interpreted roles → `HomeScreen`, roles interpreted → `Workspace`.
+
+**`WorkspaceShell` is the shell for both `/` and `/search/{id}`** (rail | map |
+optional right column). Mockup 4 is mockup 3 with a third pane — results are *not*
+a separate page, the map stays on screen. The right column renders only when there
+are findings; in-flight/empty/failed searches show the status pill over the map
+instead of an empty gutter.
+
+**Google Maps chrome is off** (`disableDefaultUI` + explicit `cameraControl`,
+`streetViewControl`, `zoomControl`, … `false`). Two things not to "fix":
+`keyboardShortcuts` stays **true** — with the buttons gone it's the only non-mouse
+way to pan/zoom; and the **Google wordmark + "Terms"/"Report a map error" links are
+required by the Maps ToS** to stay visible and unobscured, so they cannot be
+removed. The Places autocomplete is a web component with its own Roboto/white
+styling — `globals.css` restyles it via `gmp-place-autocomplete` + `::part(input)`.
+
+`web/src/lib/links.ts` classifies result links by URL pattern into badge types.
+**Keep it conservative** — an unrecognised path gets a generic badge, never an
+overclaimed "Live listing". The badge is only useful if it's trustworthy without
+clicking. Revisit only if the agent starts returning `{url, kind, label}` from
+`report_findings` (needs a schema change + eval re-run).
+
+**Contrast:** `ink-muted` (~3.4:1) and `slate-faint` (~2.8:1) are below WCAG AA for
+body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 
 ## Data model (DynamoDB single table `fmaj-{stage}-main`, PK/SK)
 
@@ -136,15 +224,57 @@ Notion cards live in their own **Phase 5 — UI redesign** (design system → lo
 - `SEARCH#<id> / META`: params, status pending→running→completed|failed, user_sub.
 - `SEARCH#<id> / RESULT#<place_id>`: written incrementally by the pipeline; frontend
   polls `GET /searches/{id}` every 3s and renders grouped by opportunity_type.
+- `SEARCH#<id> / STEP#<iso>#<place_id>`: live agent trace, written as each tool
+  returns. **TTL'd (7d) via `expires_at`** — progress, not a record, and it keeps
+  Places-derived names from living forever.
+- `SEARCH#<id> / BUDGET`: metered-API spend for this search, one attribute per
+  tool, incremented by conditional `ADD` from the parallel company Lambdas
+  (`agent/src/fmaj_agent/budget.py`). **Also TTL'd (7d) via `expires_at`** — a
+  spend counter is progress, not a record, same as `STEP#`. These two are the
+  only items that set that attribute.
+- `USER#<sub> / SEARCH#<created_at>#<id>`: owner index for `GET /searches` (the
+  workspace rail). Adjacency list, **not a GSI** — no extra provisioned capacity and
+  no infra change. Descriptive fields only, deliberately **no status**: status lives
+  on META and a denormalised copy would go stale.
 
 ## Cost discipline (why the code looks the way it does)
 
+- **Nearby Search (New) returns max 20 places and has NO pagination.** Discovery
+  therefore calls it **once per mapped type**, not once with every type bundled —
+  a bundled call caps the entire search at 20 candidates regardless of radius or
+  `MAX_COMPANIES` (this is exactly what limited a 5km Melbourne CBD search to 20).
+  3-5 calls/search on the Pro SKU is ~1000 searches/mo, so it's effectively free;
+  a test asserts the call count. Don't "optimise" it back into one call.
 - Places (New): search calls use **Pro-only field masks** (5K free/mo); `websiteUri`
   needs **Enterprise** Place Details (1K free/mo → the real monthly ceiling, ~25-33
   searches) so Details is called ONLY for the ≤40 shortlisted companies.
   `rankPreference: DISTANCE` on Nearby (user wants local results).
 - Places ToS: don't persist place data beyond the search (place_id is exempt).
 - Budgets/caps exist in code, not prompts. Keep per-search cost logged.
+- **Per-search budgets live in `fmaj_agent/config.py`, env-driven, `0 = unlimited`**
+  (`FMAJ_MAX_COMPANIES` 40, `FMAJ_MAX_WEB_SEARCHES` 2 per company,
+  `FMAJ_MAX_WEB_SEARCHES_PER_SEARCH` 10 shared, `FMAJ_MAX_TOOL_CALLS` 8,
+  `FMAJ_MAX_SECONDS` 60).
+- **Breadth and SerpAPI spend are separate knobs — keep them that way.** They
+  weren't: companies run in parallel Lambdas, so the only enforceable ceiling was
+  arithmetic (`MAX_COMPANIES × MAX_WEB_SEARCHES`), and staying inside SerpAPI's
+  ~250/month meant cutting `MAX_COMPANIES` 40→5. That silently cut results per
+  search by 8× — the knob meant to control cost was controlling the product.
+  `budget.DynamoSearchBudget` gives those Lambdas the shared counter they lacked
+  (`SEARCH#<id> / BUDGET`, conditional `ADD`), so `MAX_COMPANIES` now costs only
+  Places Details and `MAX_WEB_SEARCHES_PER_SEARCH` is the real SerpAPI ceiling.
+  Defaults: 40 companies → ~25 searches/mo on Details (Enterprise, 1K free);
+  10 shared web searches → ~25 searches/mo on SerpAPI. **Don't re-couple them by
+  lowering `MAX_COMPANIES` to save SerpAPI quota** — a test asserts they're
+  independent.
+- The per-company `MAX_WEB_SEARCHES` stays as a backstop: `DynamoSearchBudget`
+  **fails open** if DynamoDB errors, which is only safe because the local cap
+  still bounds the damage at the old arithmetic worst case.
+- `web_search` is the only metered tool; over budget it returns `ok=False` with a
+  reason, which the model can react to and the trace shows as `Skipping` — never a
+  silent drop. `FMAJ_MAX_COMPANIES=0` still caps at `discovery.HARD_MAX_COMPANIES`
+  (40) because Place Details is the Enterprise SKU. The prompt orders tools by cost
+  (own site → Adzuna → `web_search` last); that's guidance, the cap is the guarantee.
 
 ## Workflow conventions
 
@@ -161,12 +291,29 @@ Notion cards live in their own **Phase 5 — UI redesign** (design system → lo
 - Phases from PLAN.md: 0 foundations ✅ · 1 search UX ✅ (browser-verified) ·
   2 discovery ✅ (harness: ~85% relevance, 100% website coverage) · 3 agent core ✅
   (Gemini run verified) · eval set ✅ (14/14 accuracy, 20/20 links) · Step Functions
-  pipeline ✅ deployed, real searches returning real leads. **Next: Phase 4 (PDF
-  report), Phase 5 (UI redesign — start with the design-system card), Phase 6
+  pipeline ✅ deployed, real searches returning real leads · Phase 5: design system ✅
+  login ✅ home ✅ workspace ✅ results-in-right-panel ✅ + link labels ✅ ·
+  live agent trace ✅ deployed (`Fmaj-Test/Data` + `Fmaj-Test/Pipeline` both
+  redeployed), browser-verified — animated newest-first timeline, Stop wired up ·
+  mobile layouts (login, search, results) 🚧 code-complete: touch targets ≥44px
+  throughout, trace panel collapses to a one-line summary below `lg` with a
+  "Show all steps" toggle, trace⇄results switch no longer `lg`-only. **Not yet
+  verified on a real phone** — this sandbox can't run `next build`/`next dev`
+  (arm64/registry limits) or a browser, so the 375px no-scroll check and
+  pin-drag-with-touch still need a manual pass. Deferred: numbered map pins
+  (own card — needs lat/lng persisted → Pipeline redeploy + a Places ToS call)
+  and Refine prefilling the previous params.
+  **Next: eyeball mobile on a phone, then Phase 4 (PDF report) and Phase 6
   (hardening + private beta).**
 
 ## Known state / gotchas
 
+- **⚠️ Going worldwide touched the `agent` package** (models, discovery, places,
+  tools, orchestrator, prompt), so `Fmaj-Test/Pipeline` **must be redeployed** before
+  a non-AU search will work — see the next bullet. Verified in tests only: agent 76
+  passing, api 66 passing, `tsc --noEmit` + `next lint` clean. **No real overseas
+  search has been run yet** — the first one is worth watching, because Places venue
+  coverage and `role_mapping.yaml`'s types were both tuned against AU suburbs.
 - **⚠️ The `agent` package is shared by the API and the Lambdas.** Changing anything in
   it (models, discovery, tools, prompts) means **redeploying `Fmaj-Test/Pipeline`** —
   restarting the local API is not enough. Symptom of forgetting: every search fails.

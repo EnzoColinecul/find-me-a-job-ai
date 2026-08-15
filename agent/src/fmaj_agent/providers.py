@@ -72,13 +72,30 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"url": {"type": "string"}},
                     "required": ["url"]}},
     {"name": "search_jobs_adzuna",
-     "description": "Search Adzuna (AU job board) for live postings at a company.",
+     "description": ("Search Adzuna for live postings at a company. Adzuna indexes "
+                     "~19 countries; the right one is chosen automatically from the "
+                     "company's address, so you do not pass a country. If the "
+                     "company's country isn't covered it fails with a reason — that "
+                     "is normal outside those markets, so move on rather than retry."),
      "parameters": {"type": "object", "properties": {
          "company": {"type": "string"}, "role": {"type": "string"}},
          "required": ["company", "role"]}},
+    {"name": "find_seek_company_page",
+     "description": ("AUSTRALIA ONLY. Get this company's Seek employer listings page "
+                     "(au.seek.com/<company>-jobs/at-this-company). Prefer this over a "
+                     "blind site:seek.com web_search, which matches the name as a "
+                     "search term and returns other employers' jobs. Returns a URL "
+                     "ONLY if the page has at least one live vacancy, plus job_count; "
+                     "otherwise it fails and you should not link to Seek. For a company "
+                     "outside Australia it always fails — don't call it."),
+     "parameters": {"type": "object", "properties": {"company": {"type": "string"}},
+                    "required": ["company"]}},
     {"name": "web_search",
-     "description": ("Google search (SerpAPI). Use site:seek.com.au or "
-                     "site:linkedin.com/jobs with the company name. Returns links only."),
+     "description": ("Google search (SerpAPI). Aim it at a board that covers the "
+                     "company's country. site:linkedin.com/jobs works anywhere. In "
+                     "Australia try find_seek_company_page first, and treat a "
+                     "site:seek.com name search as a weak last resort. Returns links "
+                     "only."),
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
                     "required": ["query"]}},
     {"name": "extract_emails",
