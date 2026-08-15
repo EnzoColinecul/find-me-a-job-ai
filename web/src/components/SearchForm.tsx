@@ -59,9 +59,9 @@ function AddressInput({ onPlace }: { onPlace: (p: LatLng) => void }) {
     if (!places || !containerRef.current) return;
     // PlaceAutocompleteElement is a web component (Places API New).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const el: any = new (places as any).PlaceAutocompleteElement({
-      includedRegionCodes: ["au"],
-    });
+    // No includedRegionCodes — searches are worldwide; locationBias on the map
+    // still puts nearby places first without excluding other countries.
+    const el: any = new (places as any).PlaceAutocompleteElement({});
     el.style.width = "100%";
     containerRef.current.appendChild(el);
 
