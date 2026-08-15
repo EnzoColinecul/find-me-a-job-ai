@@ -104,7 +104,10 @@ export default function AddressInput({
         const { suggestions } =
           await places.AutocompleteSuggestion.fetchAutocompleteSuggestions({
             input: text,
-            includedRegionCodes: ["au"],
+            // No `includedRegionCodes` — the app is open to testers worldwide, and
+            // restricting to one country made every foreign address unfindable.
+            // `locationBias` below still puts nearby places first without
+            // excluding anywhere, which is what we actually wanted.
             sessionToken: tokenRef.current ?? undefined,
             ...(bias
               ? { locationBias: { center: bias, radius: 30_000 } }

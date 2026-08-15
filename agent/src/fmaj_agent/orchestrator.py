@@ -265,11 +265,7 @@ def investigate(
                                     "output": {"ok": False, "reason": denial}})
                     continue
 
-<<<<<<< HEAD
                 result = dispatch[tu.name](tu.input) if tu.name in dispatch else None
-=======
-                result = _DISPATCH[tu.name](tu.input) if tu.name in _DISPATCH else None
->>>>>>> feat/design-system-and-login
                 output = result.model_dump() if result else {"ok": False, "reason": "unknown"}
                 tag, meta = summarise_tool_result(tu.name, tu.input, result)
                 emit(tag, tu.name, meta)
