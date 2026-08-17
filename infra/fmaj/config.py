@@ -55,7 +55,7 @@ TEST = StageConfig(
     monthly_search_cap=10,
     log_retention_days=7,
     app_base_url="http://localhost:3000",
-    hosting_urls=["https://develop.d3ki9z08su1o3w.amplifyapp.com"],
+    hosting_urls=["https://main.d3ki9z08su1o3w.amplifyapp.com", "https://develop.d3ki9z08su1o3w.amplifyapp.com"],
 )
 
 PROD = StageConfig(
