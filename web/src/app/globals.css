@@ -180,9 +180,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-a {
-  color: var(--color-accent-strong);
-}
 
 a:hover {
   color: var(--color-accent);

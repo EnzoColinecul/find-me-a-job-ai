@@ -117,7 +117,7 @@ export default function ResultCard({
                       target="_blank"
                       rel="noreferrer noopener"
                       title={l.url}
-                      className="text-[11.5px] break-all"
+                      className="text-[11.5px] break-all text-accent-strong"
                     >
                       {l.display}
                     </a>

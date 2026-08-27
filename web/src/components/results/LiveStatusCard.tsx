@@ -18,8 +18,19 @@ export default function LiveStatusCard({ search }: { search: Search }) {
   const looking = total ? Math.min(done + 1, total) : 0;
   const pct = total ? Math.round((done / total) * 100) : 0;
 
+  const headline = action ?? "Getting started…";
+  const detail = total
+    ? `Looking at ${looking} of ${total} place${total === 1 ? "" : "s"} nearby`
+    : "Finding places nearby";
+
   return (
-    <div className="absolute right-5 bottom-5 left-5 flex items-center gap-3 rounded-float bg-surface-plain px-4 py-3 shadow-float lg:right-auto lg:max-w-[560px]">
+    /*
+     * Fixed width, not content width: the sentence changes every few seconds
+     * and a card that resized with it would jitter over the map. Whatever no
+     * longer fits is truncated and revealed on hover, in the same dark tooltip
+     * the sidebar toggle in `WorkspaceShell` uses.
+     */
+    <div className="group/status absolute right-5 bottom-5 left-5 flex items-center gap-3 rounded-float bg-surface-plain px-4 py-3 shadow-float lg:right-auto lg:w-[420px]">
       <span
         aria-hidden="true"
         className="block h-4 w-4 flex-none animate-[spin_0.9s_linear_infinite] rounded-full border-2 border-accent-strong/25 border-t-accent-strong"
@@ -27,12 +38,13 @@ export default function LiveStatusCard({ search }: { search: Search }) {
 
       <div className="min-w-0 flex-1">
         <p className="m-0 truncate text-[13px] font-semibold text-ink">
-          {action ?? "Getting started…"}
+          {headline}
         </p>
-        <p className="m-0 text-[11.5px] text-slate-muted" aria-live="polite">
-          {total
-            ? `Looking at ${looking} of ${total} place${total === 1 ? "" : "s"} nearby`
-            : "Finding places nearby"}
+        <p
+          className="m-0 truncate text-[11.5px] text-slate-muted"
+          aria-live="polite"
+        >
+          {detail}
         </p>
       </div>
 
@@ -51,6 +63,20 @@ export default function LiveStatusCard({ search }: { search: Search }) {
           />
         </div>
       )}
+
+      {/*
+       * The full sentence on hover. `aria-hidden` because it only repeats text
+       * that is already in the card — the truncation is visual, so assistive
+       * tech reads the whole thing from the paragraphs above and shouldn't hear
+       * it twice.
+       */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute bottom-full left-0 z-30 mb-2 w-full rounded-card bg-ink px-3 py-2 text-[12px] leading-normal font-medium text-white opacity-0 shadow-float transition-opacity duration-150 group-hover/status:opacity-100"
+      >
+        {headline}
+        <span className="mt-0.5 block font-normal text-white/70">{detail}</span>
+      </span>
     </div>
   );
 }

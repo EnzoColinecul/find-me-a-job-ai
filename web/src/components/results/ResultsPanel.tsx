@@ -1,9 +1,9 @@
 "use client";
 
 import { getReportUrl, type Search, type SearchResult } from "@/lib/api";
+import { Download } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
-import { Download } from "lucide-react";
 import ResultCard from "./ResultCard";
 
 /** Types the agent reports. "pending" rows are companies not yet investigated. */
@@ -142,7 +142,7 @@ export default function ResultsPanel({
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-5 py-4">
         {canDownload && (
-          <div className="flex justify-end">
+          <div className="flex items-center justify-center">
             <DownloadReport searchId={search.search_id} />
           </div>
         )}
