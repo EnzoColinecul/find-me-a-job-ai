@@ -39,7 +39,9 @@ export interface ClassifiedLink {
   label: string;
   /** Extra caveat shown next to informal sources. */
   note?: string;
-  /** What we actually render: domain + path, no protocol, no query string. */
+  /** Bare domain, no protocol, no `www.` — the link's secondary line. */
+  host: string;
+  /** Domain + trimmed path. Kept for anywhere a fuller reference is wanted. */
   display: string;
 }
 
@@ -150,7 +152,13 @@ function display(host: string, path: string): string {
 export function classifyLink(url: string): ClassifiedLink {
   const parsed = hostOf(url);
   if (!parsed) {
-    return { url, kind: "other", label: KIND_LABELS.other, display: url };
+    return {
+      url,
+      kind: "other",
+      label: KIND_LABELS.other,
+      host: url,
+      display: url,
+    };
   }
   const kind = classifyKind(parsed.host, parsed.path);
   return {
@@ -158,6 +166,7 @@ export function classifyLink(url: string): ClassifiedLink {
     kind,
     label: KIND_LABELS[kind],
     note: kind === "community_post" ? "Informal — may expire" : undefined,
+    host: parsed.host,
     display: display(parsed.host, parsed.path),
   };
 }
@@ -166,4 +175,43 @@ export function classifyLinks(urls: string[]): ClassifiedLink[] {
   return urls
     .map((u) => classifyLink(u))
     .sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
+}
+
+/**
+ * A URL in prose, plus the connector that introduces it ("… found at <url>")
+ * and any brackets around it. Deliberately greedy to the end of the token, then
+ * backed off one character so a sentence-ending "." isn't eaten as part of the
+ * path.
+ */
+const URL_IN_PROSE =
+  /(?:\s*[:;,\u2014\u2013-])?(?:\s+(?:at|on|via|see|from|here|link:?))?\s*[([]?\s*(?:https?:\/\/|www\.)[^\s\])]*[^\s\]).,;:!?]\s*[)\]]?/gi;
+
+/**
+ * Remove URLs from the agent's evidence sentence.
+ *
+ * Every link is already rendered above the evidence as a labelled link, so
+ * repeating the raw URL inside the prose — percent-encoding and all — was noise,
+ * and the longest, least readable line in the column. What's left is the
+ * sentence: what was found, and why it's worth your time.
+ *
+ * The tidy-up passes exist because removing a URL leaves punctuation behind:
+ * "…a chef vacancy: <url>." would otherwise end ":.", and "<url> and <url>."
+ * would end "— and.". Returns "" when the evidence was nothing but a link —
+ * callers should treat that as no evidence.
+ *
+ * A bare hostname with no scheme and no `www.` ("au.seek.com/x-jobs") is left
+ * alone on purpose: the pattern that would catch it also eats email addresses
+ * and ordinary prose, and a stray hostname is far less ugly than a swallowed
+ * "info@boxtech.com.au".
+ */
+export function withoutUrls(text: string): string {
+  return text
+    .replace(URL_IN_PROSE, " ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\s+(and|or)\s*(?=[.,;:]|$)/gi, "")
+    .replace(/[:;,—–-]+(?=\s*[.!?])/g, "")
+    .replace(/[\s,;:—–-]+$/, "")
+    .replace(/^[\s,.;:—–-]+/, "")
+    .trim();
 }

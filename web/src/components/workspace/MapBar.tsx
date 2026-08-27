@@ -16,7 +16,7 @@ export function SearchGlyph() {
       height="16"
       viewBox="0 0 24 24"
       aria-hidden="true"
-      className="flex-none text-slate-faint"
+      className="flex-none text-slate-muted"
     >
       <circle
         cx="11"
@@ -56,7 +56,7 @@ export function StatusPill({
       <span className={`h-2 w-2 flex-none rounded-full ${dot}`} />
       <span
         aria-live="polite"
-        className="truncate text-[12.5px] font-semibold text-ink"
+        className="truncate text-[13px] font-semibold text-ink"
       >
         {children}
       </span>

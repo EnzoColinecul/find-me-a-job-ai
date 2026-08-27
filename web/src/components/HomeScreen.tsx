@@ -36,7 +36,13 @@ export default function HomeScreen({
 
   return (
     <main className="relative min-h-dvh overflow-hidden">
-      <StreetMapBackdrop rotate={-4} spread={40} duration={26} wash="strong" />
+      <StreetMapBackdrop
+        rotate={-4}
+        spread={40}
+        duration={26}
+        blur={3}
+        wash="strong"
+      />
 
       <AppMark className="absolute top-5 left-5 sm:left-6" />
       <div className="absolute top-4 right-5 flex items-center gap-2 sm:right-6">
