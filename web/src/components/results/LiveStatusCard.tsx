@@ -41,7 +41,7 @@ export default function LiveStatusCard({ search }: { search: Search }) {
           {headline}
         </p>
         <p
-          className="m-0 truncate text-[11.5px] text-slate-muted"
+          className="m-0 truncate text-[12px] text-slate-muted"
           aria-live="polite"
         >
           {detail}

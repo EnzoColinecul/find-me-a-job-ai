@@ -35,24 +35,30 @@ function Header({
   title,
   sub,
   accessory,
+  action,
 }: {
   title: string;
   sub: string;
   /** Mobile-only control (e.g. the trace⇄results switch). */
   accessory?: React.ReactNode;
+  /** Right-aligned action for the whole set, e.g. the PDF download. */
+  action?: React.ReactNode;
 }) {
   return (
     <div className="flex-none border-b border-rail-line px-5 pt-[18px] pb-3.5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="m-0 text-[15px] font-bold text-ink">{title}</h2>
-          <p className="mt-[3px] mb-0 text-[11.5px] text-slate-muted">{sub}</p>
+          <p className="mt-[3px] mb-0 text-[12px] text-slate-muted">{sub}</p>
         </div>
-        {accessory && (
-          <div className="flex flex-none items-center lg:hidden">
-            {accessory}
-          </div>
-        )}
+        <div className="flex flex-none items-center gap-2">
+          {action}
+          {accessory && (
+            <div className="flex flex-none items-center lg:hidden">
+              {accessory}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -87,7 +93,7 @@ function DownloadReport({ searchId }: { searchId: string }) {
       type="button"
       onClick={download}
       disabled={busy}
-      className="inline-flex items-center gap-1.5 rounded-full border border-line-plain bg-surface-plain px-3 py-1.5 text-[11.5px] font-semibold text-ink shadow-card transition-colors hover:border-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:opacity-60"
+      className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-line-plain bg-surface-plain px-3 text-[12px] font-semibold text-ink shadow-card transition-colors hover:border-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong disabled:cursor-not-allowed disabled:opacity-60"
     >
       <Download size={13} strokeWidth={2.25} aria-hidden />
       {busy ? "Preparing…" : error ? "Try again" : "Download PDF"}
@@ -132,28 +138,34 @@ export default function ResultsPanel({
 
   return (
     <div className="flex h-full flex-col">
+      {/*
+        * "Results", not the first group's name: the subtitle counts every
+        * company across all three groups, so titling the panel "Jobs found"
+        * mislabelled the set the moment a careers page or an email joined it.
+        * The download moves in here too — it used to float, centred and
+        * unattached, above the first card.
+        */}
       <Header
-        title={grouped[0]?.label ?? "Results"}
+        title="Results"
         sub={`${found.length} ${found.length === 1 ? "company" : "companies"} nearby${
           inProgress ? " · still looking" : " · updated just now"
         }`}
         accessory={headerAccessory}
+        action={
+          canDownload ? (
+            <DownloadReport searchId={search.search_id} />
+          ) : undefined
+        }
       />
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-5 py-4">
-        {canDownload && (
-          <div className="flex items-center justify-center">
-            <DownloadReport searchId={search.search_id} />
-          </div>
-        )}
-
-        {grouped.map((g, gi) => (
+        {/* Every group is titled, including the first — it used to be the one
+            group the user had to infer from the panel heading. */}
+        {grouped.map((g) => (
           <section key={g.label} className="flex flex-col gap-3">
-            {gi > 0 && (
-              <h3 className="m-0 mt-2 text-[11px] font-bold tracking-[0.05em] text-slate-faint uppercase">
-                {g.label}
-              </h3>
-            )}
+            <h3 className="m-0 mt-2 text-[11px] font-bold tracking-[0.05em] text-slate-muted uppercase first:mt-0">
+              {g.label}
+            </h3>
             {g.items.map((r) => {
               n += 1;
               return (
@@ -169,14 +181,14 @@ export default function ResultsPanel({
         ))}
 
         {inProgress && (
-          <p className="m-0 px-1 text-[11.5px] leading-normal text-slate-muted">
+          <p className="m-0 px-1 text-[12px] leading-normal text-slate-muted">
             More may still appear — I&apos;m working through the rest.
           </p>
         )}
 
         <Link
           href="/"
-          className="mt-2 text-center text-[11.5px] font-semibold no-underline"
+          className="mt-2 inline-flex min-h-11 items-center justify-center self-center text-[13px] font-semibold no-underline"
         >
           Start another search
         </Link>

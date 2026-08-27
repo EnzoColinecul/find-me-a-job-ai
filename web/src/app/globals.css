@@ -24,7 +24,7 @@
   --color-rail: #fafaf8; /* left rail background */
   --color-rail-line: #ecebe6; /* rail border + dividers */
   --color-rail-active: #eceae4; /* selected recent-search row */
-  --color-rail-muted: #a9a69c; /* rail section labels, meta */
+  --color-rail-muted: #656259; /* rail labels + meta — 5.8:1 on rail, 5.1:1 on rail-active */
 
   /* ---- Lines ------------------------------------------------------- */
   --color-line: #ddd6c2; /* hairlines, card borders */
@@ -40,6 +40,12 @@
    * Both are fine for large (>=18.66px bold / 24px) or decorative text only —
    * map street labels, fine print set at >=18px, and so on. For body copy use
    * `slate-muted` (~5.7:1 on white) or `ink`.
+   *
+   * `slate-faint` and the old `rail-muted` (#a9a69c, ~2.3:1) had both leaked
+   * into 10-11px UI copy on `/search/[id]` — link notes, group headings, the
+   * "RECENT SEARCHES" label, the free-search line. `rail-muted` is now darkened
+   * to a real body-text token; `slate-faint` keeps its decorative value and
+   * those usages moved to `slate-muted`. Grep before reaching for either.
    */
   --color-ink: #14213d; /* primary text, logo navy */
   --color-ink-muted: #8b8574; /* map labels, decorative — not body copy */
@@ -51,6 +57,7 @@
   /* ---- Accents ----------------------------------------------------- */
   --color-accent: #3d6fb5; /* primary actions, links */
   --color-accent-strong: #2f6fed; /* focus / active */
+  --color-accent-deep: #2a5c9a; /* accent text on tinted fills — #2f6fed is 3.8:1 on --color-rail-active */
   --color-pin: #ff5a45; /* map pin, location marker */
   --color-success: #2fa572; /* found / complete */
   --color-success-deep: #4f8c62; /* park labels, quiet success */
@@ -138,6 +145,19 @@
   70% {
     box-shadow: 0 0 0 6px rgb(47 111 237 / 0);
     opacity: 0.85;
+  }
+}
+
+/*
+ * Under the Google map while the SDK boots (~3s on a cold load). Without it the
+ * biggest element on the page is blank white and the app reads as broken.
+ */
+@keyframes mapShimmer {
+  from {
+    transform: translateX(-60%);
+  }
+  to {
+    transform: translateX(60%);
   }
 }
 
