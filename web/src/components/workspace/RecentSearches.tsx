@@ -13,14 +13,14 @@ function titleCase(s: string): string {
  *
  * `location_label` is whatever the workspace could name the point at search
  * time, and `useReverseGeocode` deliberately falls back to `formatLatLng` when
- * the lookup fails — which it does for every pin dropped on the map until the
- * **Geocoding API is enabled on the browser key** (see the warning in
- * `useReverseGeocode.ts`; it's a manual GCP console step). Those searches were
- * saved with "-37.81569, 144.96328" as their label, and the rail then split on
- * the comma and showed half a coordinate: "Software Engineer · -37.81569".
+ * the lookup fails. Searches saved during those windows carry "-37.81569,
+ * 144.96328" as their label, and the rail would otherwise split on the comma
+ * and show half a coordinate: "Software Engineer · -37.81569".
  *
- * Enabling the API fixes new searches; this fixes the ones already saved, and
- * every future failed lookup.
+ * Two causes, both now fixed: the Geocoding API missing from the browser key
+ * (enabled 2026-08-07) and a lookup racing the Maps JS loader (2026-08-27, see
+ * `useReverseGeocode.ts`). This still earns its keep — it repairs the rows
+ * already saved, and any lookup that genuinely fails in future.
  */
 function isCoordinateLabel(label: string): boolean {
   return /^\s*-?\d{1,3}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?\s*$/.test(label);
