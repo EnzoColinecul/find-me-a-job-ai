@@ -2,7 +2,8 @@
 
 Requires AWS creds (Bedrock + Secrets Manager) and enabled model access. Example:
   AWS_PROFILE=fmaj-deploy uv run python -m fmaj_agent.run \\
-      --name "Single O Surry Hills" --website https://singleo.com.au/ --role barista
+      --name "Single O Surry Hills" --website https://singleo.com.au/ \\
+      --role barista --country au
 """
 import argparse
 import json
@@ -20,6 +21,13 @@ def main() -> None:
     p.add_argument("--address", default="")
     p.add_argument("--types", default="", help="comma-separated Places types")
     p.add_argument("--role", action="append", required=True, dest="roles")
+    p.add_argument(
+        "--country",
+        default=None,
+        help="ISO-3166 alpha-2 (au, gb, us…). In a real search this comes from "
+             "Places; here it decides which job boards the agent may use. Omit it "
+             "and the country-specific boards are skipped.",
+    )
     args = p.parse_args()
 
     company = Company(
@@ -29,6 +37,7 @@ def main() -> None:
         website=args.website,
         types=[t.strip() for t in args.types.split(",") if t.strip()],
         roles=args.roles,
+        country_code=(args.country or "").lower() or None,
     )
     run = investigate(company)
     print("\n=== FINDINGS ===")

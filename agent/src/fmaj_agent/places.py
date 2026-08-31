@@ -6,6 +6,7 @@ Cost discipline (see docs/PLAN.md §2.3):
   calls/month, so callers must restrict it to the shortlisted companies.
 Call counts are tracked so every search can log its Places usage.
 """
+
 from dataclasses import dataclass, field
 
 import httpx
@@ -44,9 +45,16 @@ def _check(resp: httpx.Response) -> httpx.Response:
         )
     raise PlacesError(f"{resp.status_code} {resp.request.url}: {body[:500]}")
 
-# Pro tier — safe for discovery volume (5K free/mo)
+
+# Pro tier — safe for discovery volume (5K free/mo).
+#
+# `addressComponents` is ALSO Pro, so asking for it costs nothing extra, and it is
+# the only place we get an exact ISO-3166 country code (`shortText` on the
+# component typed `country`). The agent needs that to pick a job board that covers
+# the search area instead of assuming Australia — see `discovery._country_code`.
+# Don't move it into DETAILS_FIELD_MASK: Details is the Enterprise SKU.
 SEARCH_FIELD_MASK = (
-    "places.id,places.displayName,places.formattedAddress,places.location,places.types"
+    "places.id,places.displayName,places.formattedAddress,places.location," "places.types,places.addressComponents"
 )
 # Enterprise tier — shortlist only (1K free/mo)
 DETAILS_FIELD_MASK = "id,websiteUri,nationalPhoneNumber"
@@ -81,9 +89,7 @@ class PlacesClient:
             "Content-Type": "application/json",
         }
 
-    def search_nearby(
-        self, lat: float, lng: float, radius_m: float, included_types: list[str]
-    ) -> list[dict]:
+    def search_nearby(self, lat: float, lng: float, radius_m: float, included_types: list[str]) -> list[dict]:
         """Nearby Search (New). Max 20 results per request, no pagination."""
         self.stats.nearby_calls += 1
         body = {

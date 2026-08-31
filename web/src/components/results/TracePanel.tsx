@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { Search, TraceStep } from "@/lib/api";
-import { currentAction, narrate } from "@/lib/trace-narrate";
+import { currentAction, narrate, toolLabel } from "@/lib/trace-narrate";
 import { cx } from "../ui/cx";
 
 /** Tag colours: found → success, checking → warn, skipping → muted. */
@@ -10,7 +10,9 @@ const TAG_STYLE: Record<TraceStep["tag"], string> = {
   searching: "text-accent",
   checking: "text-accent",
   found: "text-success-deep",
-  skipping: "text-slate-faint",
+  // Was `slate-faint` (~2.6:1) at 10.5px — below AA, and this is the tag that
+  // explains why something was dropped, so it's the last one to whisper.
+  skipping: "text-slate-muted",
 };
 
 const TAG_LABEL: Record<TraceStep["tag"], string> = {
@@ -18,6 +20,14 @@ const TAG_LABEL: Record<TraceStep["tag"], string> = {
   checking: "Checking",
   found: "Found",
   skipping: "Skipping",
+};
+
+/** The same tags on a search that has already finished. */
+const TAG_LABEL_PAST: Record<TraceStep["tag"], string> = {
+  searching: "Searched",
+  checking: "Checked",
+  found: "Found",
+  skipping: "Skipped",
 };
 
 function Row({
@@ -52,31 +62,33 @@ function Row({
 
       <p
         className={cx(
-          "m-0 text-[10.5px] font-bold tracking-[0.06em] uppercase",
+          "m-0 text-[11px] font-bold tracking-[0.06em] uppercase",
           TAG_STYLE[step.tag],
         )}
       >
-        {TAG_LABEL[step.tag]}
+        {(live ? TAG_LABEL : TAG_LABEL_PAST)[step.tag]}
       </p>
       <p className="mt-1 mb-2 text-[13px] leading-[1.45] text-ink">
         {narrate(step, search)}
       </p>
-      <div className="flex flex-wrap items-baseline gap-2">
-        <code className="rounded-card bg-paper-deep px-1.5 py-0.5 font-mono text-[10.5px] text-slate-muted">
-          {step.tool}
-        </code>
-        {step.meta && (
-          <span className="min-w-0 truncate text-[10.5px] text-slate-faint">
-            {step.meta}
-          </span>
-        )}
-      </div>
+      {/*
+       * A human name for the call, not the identifier. This used to print
+       * `report` / `extract_contact` / `web_search` in a code chip, next to a
+       * truncated internal `meta` string ("budget reached: 10 web_search
+       * call(s) for this sea…") — our vocabulary leaking into the user's panel.
+       * The meta is gone entirely: everything in it that mattered is already in
+       * the sentence above, which is where `narrate` puts it.
+       */}
+      <span className="inline-flex rounded-card bg-paper-deep px-1.5 py-0.5 text-[11px] font-medium text-slate-muted">
+        {toolLabel(step.tool)}
+      </span>
     </li>
   );
 }
 
 /**
- * Mockup 5 — "What I'm doing. Nothing hidden."
+ * Mockup 5 — "What I'm doing. Nothing hidden." (past tense once it's done —
+ * a finished search narrated in the present reads as if it were still going.)
  *
  * Newest step at the top, dropping in as it arrives. Reverse-chronological
  * because the interesting one is always the latest: the alternative is asking
@@ -117,18 +129,18 @@ export default function TracePanel({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="m-0 text-[15px] font-bold text-ink">
-              What I&apos;m doing
+              {live ? "What I'm doing" : "What I did"}
             </h2>
             {/* While the search is live, the map's status card already shows this
                 same sentence right above — so only show it here when it isn't
                 duplicated (i.e. looking back at a finished search's trace). */}
             {!live && (
-              <p className="mt-[3px] mb-0 truncate text-[11.5px] text-slate-muted lg:hidden">
+              <p className="mt-[3px] mb-0 truncate text-[12px] text-slate-muted lg:hidden">
                 {summary}
               </p>
             )}
-            <p className="mt-[3px] mb-0 hidden text-[11.5px] text-slate-muted lg:block">
-              Live view of every step
+            <p className="mt-[3px] mb-0 hidden text-[12px] text-slate-muted lg:block">
+              {live ? "Live view of every step" : "Every step, in order"}
             </p>
           </div>
           <div className="flex flex-none items-center gap-2 lg:hidden">
@@ -138,7 +150,7 @@ export default function TracePanel({
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
                 aria-expanded={expanded}
-                className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3 text-[11px] font-semibold text-ink"
+                className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3 text-[12px] font-semibold text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
               >
                 {expanded ? "Hide steps" : "Show all steps"}
               </button>
@@ -154,7 +166,7 @@ export default function TracePanel({
         )}
       >
         {ordered.length === 0 ? (
-          <p className="m-0 text-[12.5px] leading-normal text-slate-muted">
+          <p className="m-0 text-[12px] leading-normal text-slate-muted">
             {live
               ? "Starting up — the first step appears as soon as I've found places nearby."
               : "No steps were recorded for this search."}

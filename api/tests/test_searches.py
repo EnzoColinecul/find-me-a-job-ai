@@ -128,9 +128,28 @@ def _user(table, sub="u1", used=False):
 VALID = dict(lat=-33.87, lng=151.21, radius_km=5, roles=["chef"])
 
 
-def test_validation_rejects_outside_australia() -> None:
+@pytest.mark.parametrize(
+    "lat,lng",
+    [
+        (51.5074, -0.1278),    # London
+        (40.7128, -74.0060),   # New York
+        (-36.8485, 174.7633),  # Auckland
+        (19.4326, -99.1332),   # Mexico City
+    ],
+)
+def test_validation_accepts_any_country(lat: float, lng: float) -> None:
+    """The Australia-only bounding box is gone — testers search from anywhere."""
+    req = SearchRequest(lat=lat, lng=lng, radius_km=5, roles=["chef"])
+    assert (req.lat, req.lng) == (lat, lng)
+
+
+@pytest.mark.parametrize(
+    "lat,lng", [(91.0, 0.0), (-91.0, 0.0), (0.0, 181.0), (0.0, -181.0)]
+)
+def test_validation_rejects_impossible_coordinates(lat: float, lng: float) -> None:
+    """Still a sanity check: off-globe values mean a swapped or malformed payload."""
     with pytest.raises(ValidationError):
-        SearchRequest(lat=51.5, lng=-0.12, radius_km=5, roles=["chef"])  # London
+        SearchRequest(lat=lat, lng=lng, radius_km=5, roles=["chef"])
 
 
 def test_validation_rejects_big_radius() -> None:

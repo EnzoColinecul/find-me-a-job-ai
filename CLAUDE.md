@@ -2,9 +2,20 @@
 
 Job search by geolocation: a user picks a location + radius + role(s); Google Places
 finds nearby businesses; an LLM agent investigates each one (careers page → job boards
-→ contact email) and returns a ranked list of opportunities. V1 market: **Australia**
-(hospitality/retail/trades focus — Places is weak for office roles). Full plan:
+→ contact email) and returns a ranked list of opportunities. Focus is
+hospitality/retail/trades — Places is weak for office roles. Full plan:
 `docs/PLAN.md`. Diagram: `docs/architecture.mermaid`.
+
+**Searchable worldwide since 2026-08-15.** V1 was Australia-only, enforced by a
+bounding box in `SearchRequest` and `includedRegionCodes: ["au"]` on the address
+autocomplete; both are gone so the private beta can be tested from any country.
+Nothing gates on geography any more — gate on plan/quota instead. What remains
+country-specific is _job-board coverage_, and it is now data, not an assumption:
+discovery reads the ISO country off the Places address components onto
+`Company.country_code`, the orchestrator binds that into the tool dispatch, and
+each board tool decides for itself (Adzuna picks its national index, Seek refuses
+outside AU). Australia is still the best-covered market; elsewhere the agent leans
+harder on the company's own site. See "LLM provider (agent)" below.
 
 ## Repo layout
 
@@ -59,6 +70,7 @@ scripts/ store-external-secrets.sh (Secrets Manager registration)
 ## LLM provider (agent)
 
 Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/providers.py`).
+
 - **Currently using `gemini`** (`gemini-3.6-flash` on Vertex, GCP credits). Needs
   `GOOGLE_APPLICATION_CREDENTIALS` pointing at the SA key. Gemini 3 requires echoing
   `thought_signature` on function-call parts — handled in GeminiProvider.
@@ -68,6 +80,18 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
   JSON), hard budgets in code (see "Cost discipline" — read off `config` at call
   time, not copied into module constants), forced structured report on budget
   breach, token/cost accounting per run. Tools never raise (ToolResult).
+- **Country-aware job boards (2026-08-15).** `Company.country_code` (ISO-3166
+  alpha-2, lowercase) comes from the Places `addressComponents` — Pro tier, so it
+  costs nothing extra; `discovery._country_code` reads it, and a place missing the
+  component inherits the shortlist's majority country. `orchestrator._dispatch_for`
+  binds it into the tool callables, so **the model never passes a country** — a
+  hallucinated `"au"` would put a Berlin bakery back in the Australian index, which
+  is the bug this replaced. `search_jobs_adzuna` routes to
+  `/v1/api/jobs/{country}/search/1` for the ~19 markets in `ADZUNA_COUNTRIES`;
+  `find_seek_company_page` is AU-only (`SEEK_COUNTRIES`). Unknown or uncovered
+  country → `ok=False` with a readable reason the model can route around, shown in
+  the trace as `Skipping` — **never a silent fallback to Australia**. Adding
+  `nz.seek.co.nz` needs its own robots.txt check first; don't assume it mirrors AU.
 - Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn for listing
   content** (links only via SerpAPI `site:` queries) — ToS requirement, don't "fix"
   this. **One deliberate exception** (2026-08-11): `find_seek_company_page` GETs
@@ -116,7 +140,7 @@ venues instead of Text-Searching appliance stores. Falls back to the raw text as
 role if the LLM output is unusable.
 
 **`max_roles` is one knob** (`api/app/settings.py`, PoC = 1). The API validates against
-it and the frontend *fetches* it from `GET /config` — raising it for subscriptions needs
+it and the frontend _fetches_ it from `GET /config` — raising it for subscriptions needs
 no code change. Never hardcode role/radius limits in the frontend.
 
 ## Design (mockups landed 2026-08-04)
@@ -172,7 +196,7 @@ Screen flow lives in `web/src/app/page.tsx`: signed out → `LoginScreen`, signe
 with no interpreted roles → `HomeScreen`, roles interpreted → `Workspace`.
 
 **`WorkspaceShell` is the shell for both `/` and `/search/{id}`** (rail | map |
-optional right column). Mockup 4 is mockup 3 with a third pane — results are *not*
+optional right column). Mockup 4 is mockup 3 with a third pane — results are _not_
 a separate page, the map stays on screen. The right column renders only when there
 are findings; in-flight/empty/failed searches show the status pill over the map
 instead of an empty gutter.
@@ -285,6 +309,12 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
 
 ## Known state / gotchas
 
+- **⚠️ Going worldwide touched the `agent` package** (models, discovery, places,
+  tools, orchestrator, prompt), so `Fmaj-Test/Pipeline` **must be redeployed** before
+  a non-AU search will work — see the next bullet. Verified in tests only: agent 76
+  passing, api 66 passing, `tsc --noEmit` + `next lint` clean. **No real overseas
+  search has been run yet** — the first one is worth watching, because Places venue
+  coverage and `role_mapping.yaml`'s types were both tuned against AU suburbs.
 - **⚠️ The `agent` package is shared by the API and the Lambdas.** Changing anything in
   it (models, discovery, tools, prompts) means **redeploying `Fmaj-Test/Pipeline`** —
   restarting the local API is not enough. Symptom of forgetting: every search fails.

@@ -24,9 +24,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.settings import settings
 
-# rough Australia bounding box (PoC market restriction)
-AU_LAT = (-44.0, -9.5)
-AU_LNG = (112.0, 154.5)
+# No market restriction: anyone, anywhere can run a search. Coordinates are only
+# sanity-checked against the globe, which still catches a swapped lat/lng or a
+# malformed payload without deciding where a user is allowed to live.
+#
+# There WAS an Australia bounding box here while V1 was AU-only. Removed
+# deliberately (2026-08-15) so the beta can be tested from any country — the
+# country-specific parts now live in the agent, which reads the country off the
+# Places result and picks a job board that covers it (fmaj_agent.tools.impl).
+# Don't reintroduce a geographic gate here; gate on plan/quota instead.
+LAT_RANGE = (-90.0, 90.0)
+LNG_RANGE = (-180.0, 180.0)
 
 
 class RoleSpec(BaseModel):
@@ -68,16 +76,16 @@ class SearchRequest(BaseModel):
 
     @field_validator("lat")
     @classmethod
-    def _lat_in_au(cls, v: float) -> float:
-        if not AU_LAT[0] <= v <= AU_LAT[1]:
-            raise ValueError("Location must be within Australia")
+    def _lat_on_earth(cls, v: float) -> float:
+        if not LAT_RANGE[0] <= v <= LAT_RANGE[1]:
+            raise ValueError("Latitude must be between -90 and 90")
         return v
 
     @field_validator("lng")
     @classmethod
-    def _lng_in_au(cls, v: float) -> float:
-        if not AU_LNG[0] <= v <= AU_LNG[1]:
-            raise ValueError("Location must be within Australia")
+    def _lng_on_earth(cls, v: float) -> float:
+        if not LNG_RANGE[0] <= v <= LNG_RANGE[1]:
+            raise ValueError("Longitude must be between -180 and 180")
         return v
 
     @field_validator("roles")

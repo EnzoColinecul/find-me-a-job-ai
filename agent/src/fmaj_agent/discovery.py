@@ -8,6 +8,7 @@ Pipeline per search:
   3. Rank by distance, cap at MAX_COMPANIES.
   4. Place Details (Enterprise fields) for the capped list only -> websiteUri.
 """
+
 import logging
 import math
 from dataclasses import dataclass, field
@@ -39,6 +40,26 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _country_code(place: dict) -> str | None:
+    """ISO-3166 alpha-2 for a Places result, lowercased ("au", "gb", "us").
+
+    Read off the `country` address component, which the Pro field mask already
+    pays for. This is what makes the search country-aware instead of AU-only:
+    the per-company agent picks its job board from it (see
+    `fmaj_agent.tools.impl.search_jobs_adzuna`).
+
+    Returns None when Google gives no country component — a plus-code-only or
+    unaddressed place. Callers must treat that as "unknown", never as a default
+    country: guessing would send a Sydney cafe's search to a UK job index.
+    """
+    for comp in place.get("addressComponents") or []:
+        if "country" in (comp.get("types") or []):
+            short = (comp.get("shortText") or "").strip()
+            if len(short) == 2 and short.isalpha():
+                return short.lower()
+    return None
+
+
 def _to_candidate(place: dict, roles: list[str]) -> dict:
     return {
         "place_id": place["id"],
@@ -47,8 +68,21 @@ def _to_candidate(place: dict, roles: list[str]) -> dict:
         "types": place.get("types", []),
         "lat": (place.get("location") or {}).get("latitude"),
         "lng": (place.get("location") or {}).get("longitude"),
+        "country_code": _country_code(place),
         "roles": list(roles),
     }
+
+
+def _majority_country(candidates: list[dict]) -> str | None:
+    """The country most of the shortlist sits in, or None if none reported one."""
+    counts: dict[str, int] = {}
+    for cand in candidates:
+        code = cand.get("country_code")
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=lambda c: counts[c])
 
 
 def _as_specs(roles: list) -> list[RoleSpec]:
@@ -127,6 +161,12 @@ def discover(
     ranked.sort(key=lambda c: c["distance_km"])
     shortlist = ranked[:max_companies]
 
+    # One country for the search, from the places nearest the pin. Individual
+    # results can be missing a country component, and a search near a land border
+    # can legitimately straddle two — the majority of the shortlist is a better
+    # answer for those stragglers than dropping their job-board lookup entirely.
+    search_country = _majority_country(shortlist)
+
     # Enterprise details for shortlist ONLY (websiteUri)
     companies: list[Company] = []
     for cand in shortlist:
@@ -147,6 +187,7 @@ def discover(
                 roles=cand["roles"],
                 lat=cand["lat"],
                 lng=cand["lng"],
+                country_code=cand.get("country_code") or search_country,
             )
         )
 
@@ -156,6 +197,10 @@ def discover(
         "within_radius": len(ranked),
         "shortlisted": len(companies),
         "with_website": sum(1 for c in companies if c.website),
+        # Logged so a disappointing overseas search is diagnosable: "no listings"
+        # reads very differently once you can see we resolved the wrong country,
+        # or none at all.
+        "country": search_country or "unknown",
     }
     logger.info("discovery stats: %s", stats)
     return DiscoveryResult(companies=companies, stats=stats)

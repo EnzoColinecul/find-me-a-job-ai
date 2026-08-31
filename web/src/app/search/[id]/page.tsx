@@ -179,7 +179,7 @@ export default function SearchPage({
         <button
           type="button"
           onClick={() => setShowTrace(false)}
-          className="inline-flex min-h-11 flex-none items-center gap-1 rounded-pill bg-accent-strong pr-2.5 pl-3.5 text-[12px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+          className="inline-flex min-h-11 flex-none items-center gap-1 rounded-pill bg-accent-strong pr-2.5 pl-3.5 text-[13px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
         >
           See results ({found.length})
           <svg
@@ -203,7 +203,7 @@ export default function SearchPage({
         <button
           type="button"
           onClick={() => setShowTrace(true)}
-          className="inline-flex min-h-11 flex-none items-center rounded-pill px-2.5 text-[11px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
+          className="inline-flex min-h-11 flex-none items-center rounded-pill px-2.5 text-[12px] font-semibold text-slate-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong"
         >
           See what I did
         </button>
@@ -223,6 +223,11 @@ export default function SearchPage({
   // Numbered pins for the results, in the same order the cards are numbered.
   // Results without coordinates (older/expired searches, or a pre-pin backend)
   // are skipped — the map simply doesn't place them, cards are unaffected.
+  //
+  // Venues in the same building sit metres apart, which at the camera that
+  // fits the search radius is well inside one pin's width. Separating them is
+  // `WorkspaceShell`'s job, not this page's: it needs the map's measured size
+  // to know how far "one pin's width" is on the ground.
   const markers = orderedResults(search).flatMap((r, i) =>
     typeof r.lat === "number" && typeof r.lng === "number"
       ? [
@@ -251,13 +256,15 @@ export default function SearchPage({
           ? "You've used your free search. Your past results are still here in the rail."
           : null
       }
-      rightPanelTitle={showingTrace ? "What I'm doing" : "Results"}
+      rightPanelTitle={
+        showingTrace ? (inProgress ? "What I'm doing" : "What I did") : "Results"
+      }
       rightPanel={panel}
       rightPanelSwitch={viewSwitch}
       topBar={
         <MapBar>
           <SearchGlyph />
-          <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-ink">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">
             {titleCase(search.params.roles.join(", "))} · {place} ·{" "}
             {search.params.radius_km} km
           </span>
@@ -266,14 +273,14 @@ export default function SearchPage({
               type="button"
               onClick={stop}
               disabled={stopping}
-              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[11.5px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pin disabled:opacity-50"
+              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[12px] font-semibold text-ink transition-colors duration-150 hover:bg-line-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pin disabled:opacity-50"
             >
               {stopping ? "Stopping…" : "Stop"}
             </button>
           ) : (
             <Link
               href={refineHref}
-              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[11.5px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
+              className="inline-flex min-h-11 flex-none items-center rounded-pill bg-paper-deep px-3.5 text-[12px] font-semibold text-ink no-underline transition-colors duration-150 hover:bg-line-soft"
             >
               Refine
             </Link>
@@ -306,7 +313,7 @@ export default function SearchPage({
               <strong className="text-[13px] text-ink">
                 Something went wrong with this search.
               </strong>
-              <p className="mt-1 mb-0 text-[11.5px] leading-normal text-slate-muted">
+              <p className="mt-1 mb-0 text-[12px] leading-normal text-slate-muted">
                 It didn&apos;t finish, so this isn&apos;t a &quot;nothing
                 found&quot; answer. Please try again — if it keeps happening,
                 the problem is on our side.
@@ -320,11 +327,14 @@ export default function SearchPage({
               <strong className="text-[13px] text-ink">
                 You stopped this search
               </strong>
-              <p className="mt-1 mb-2 text-[11.5px] leading-normal text-slate-muted">
+              <p className="mt-1 mb-2 text-[12px] leading-normal text-slate-muted">
                 Nothing had turned up yet when it stopped. The steps I got
                 through are still on the right.
               </p>
-              <Link href="/" className="text-[11.5px] font-semibold">
+              <Link
+                href="/"
+                className="inline-flex min-h-11 items-center text-[13px] font-semibold"
+              >
                 Start another search →
               </Link>
             </div>
@@ -335,12 +345,15 @@ export default function SearchPage({
               <strong className="text-[13px] text-ink">
                 Nothing worth contacting within {search.params.radius_km} km
               </strong>
-              <p className="mt-1 mb-2 text-[11.5px] leading-normal text-slate-muted">
+              <p className="mt-1 mb-2 text-[12px] leading-normal text-slate-muted">
                 I checked every business I could find and none had an opening or
                 a way in. A wider radius or a different role usually turns
                 something up.
               </p>
-              <Link href="/" className="text-[11.5px] font-semibold">
+              <Link
+                href="/"
+                className="inline-flex min-h-11 items-center text-[13px] font-semibold"
+              >
                 Try another search →
               </Link>
             </div>

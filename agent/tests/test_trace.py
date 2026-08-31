@@ -24,9 +24,13 @@ def test_every_label_names_a_tool_we_actually_run() -> None:
     The mockup shows a `places.details` row for a skipped company; we don't call
     Place Details during triage, so that label must not appear here.
     """
-    from fmaj_agent.orchestrator import _DISPATCH
+    from fmaj_agent.models import Company
+    from fmaj_agent.orchestrator import _dispatch_for
 
-    known = set(_DISPATCH) | {"discovery", "triage", "report_findings"}
+    dispatch = _dispatch_for(
+        Company(place_id="p", name="X", address="", roles=["chef"], country_code="au")
+    )
+    known = set(dispatch) | {"discovery", "triage", "report_findings"}
     assert set(TOOL_LABELS) == known
     assert "places.details" not in TOOL_LABELS.values()
 

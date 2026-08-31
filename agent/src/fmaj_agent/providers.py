@@ -10,6 +10,7 @@ Normalized messages (list[dict]):
 
 Provider-neutral tool defs — one JSON schema per tool, adapted per provider.
 """
+
 import logging
 import time
 from dataclasses import dataclass, field
@@ -20,8 +21,15 @@ logger = logging.getLogger(__name__)
 
 # Transient failures worth retrying (DNS blips, read timeouts, 429/503 from the API).
 _RETRY_HINTS = (
-    "connecterror", "readtimeout", "timeout", "nodename", "temporarily",
-    "429", "503", "unavailable", "deadline",
+    "connecterror",
+    "readtimeout",
+    "timeout",
+    "nodename",
+    "temporarily",
+    "429",
+    "503",
+    "unavailable",
+    "deadline",
 )
 _MAX_ATTEMPTS = 3
 
@@ -37,9 +45,10 @@ def _with_retry(fn, what: str):
             if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
                 raise
             last = exc
-            delay = 2 ** attempt  # 2s, 4s
-            logger.warning("%s transient failure (attempt %d/%d), retrying in %ds: %s",
-                           what, attempt, _MAX_ATTEMPTS, delay, exc)
+            delay = 2**attempt  # 2s, 4s
+            logger.warning(
+                "%s transient failure (attempt %d/%d), retrying in %ds: %s", what, attempt, _MAX_ATTEMPTS, delay, exc
+            )
             time.sleep(delay)
     raise last  # pragma: no cover
 
@@ -63,55 +72,93 @@ class Turn:
 
 
 TOOLS = [
-    {"name": "fetch_url",
-     "description": "Fetch a web page and return its main text (truncated).",
-     "parameters": {"type": "object", "properties": {"url": {"type": "string"}},
-                    "required": ["url"]}},
-    {"name": "find_careers_link",
-     "description": "Scan a company homepage for careers/jobs page links.",
-     "parameters": {"type": "object", "properties": {"url": {"type": "string"}},
-                    "required": ["url"]}},
-    {"name": "search_jobs_adzuna",
-     "description": "Search Adzuna (AU job board) for live postings at a company.",
-     "parameters": {"type": "object", "properties": {
-         "company": {"type": "string"}, "role": {"type": "string"}},
-         "required": ["company", "role"]}},
-    {"name": "find_seek_company_page",
-     "description": ("Get this company's Seek employer listings page "
-                     "(au.seek.com/<company>-jobs/at-this-company). Prefer this over a "
-                     "blind site:seek.com web_search, which matches the name as a "
-                     "search term and returns other employers' jobs. Returns a URL "
-                     "ONLY if the page has at least one live vacancy, plus job_count; "
-                     "otherwise it fails and you should not link to Seek."),
-     "parameters": {"type": "object", "properties": {"company": {"type": "string"}},
-                    "required": ["company"]}},
-    {"name": "web_search",
-     "description": ("Google search (SerpAPI). For Seek, try find_seek_company_page "
-                     "first; use this for site:linkedin.com/jobs, or only as a weak "
-                     "last-resort site:seek.com name search. Returns links only."),
-     "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
-                    "required": ["query"]}},
-    {"name": "extract_emails",
-     "description": "Scrape a contact/about page for recruitment emails.",
-     "parameters": {"type": "object", "properties": {"url": {"type": "string"}},
-                    "required": ["url"]}},
-    {"name": "report_findings",
-     "description": "Report the final result. Call exactly once when done.",
-     "parameters": {"type": "object", "properties": {
-         "opportunity_type": {"type": "string",
-             "enum": ["careers_page", "job_listing", "contact_email", "none"]},
-         "links": {"type": "array", "items": {"type": "string"}},
-         "emails": {"type": "array", "items": {"type": "string"}},
-         "evidence": {"type": "string"},
-         "confidence": {"type": "number"}},
-         "required": ["opportunity_type", "evidence", "confidence"]}},
+    {
+        "name": "fetch_url",
+        "description": "Fetch a web page and return its main text (truncated).",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    },
+    {
+        "name": "find_careers_link",
+        "description": "Scan a company homepage for careers/jobs page links.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    },
+    {
+        "name": "search_jobs_adzuna",
+        "description": (
+            "Search Adzuna for live postings at a company. Adzuna indexes "
+            "~19 countries; the right one is chosen automatically from the "
+            "company's address, so you do not pass a country. If the "
+            "company's country isn't covered it fails with a reason — that "
+            "is normal outside those markets, so move on rather than retry."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"company": {"type": "string"}, "role": {"type": "string"}},
+            "required": ["company", "role"],
+        },
+    },
+    {
+        "name": "find_seek_company_page",
+        "description": (
+            "AUSTRALIA ONLY. Get this company's Seek employer listings page "
+            "(au.seek.com/<company>-jobs/at-this-company). Prefer this over a "
+            "blind site:seek.com web_search, which matches the name as a "
+            "search term and returns other employers' jobs. Returns a URL "
+            "ONLY if the page has at least one live vacancy, plus job_count; "
+            "otherwise it fails and you should not link to Seek. For a company "
+            "outside Australia it always fails — don't call it."
+        ),
+        "parameters": {"type": "object", "properties": {"company": {"type": "string"}}, "required": ["company"]},
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Google search (SerpAPI). Aim it at a board that covers the "
+            "company's country. site:linkedin.com/jobs works anywhere. In "
+            "Australia try find_seek_company_page first, and treat a "
+            "site:seek.com name search as a weak last resort. Returns links "
+            "only."
+        ),
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    },
+    {
+        "name": "extract_emails",
+        "description": "Scrape a contact/about page for recruitment emails.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    },
+    {
+        "name": "report_findings",
+        "description": "Report the final result. Call exactly once when done.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "opportunity_type": {
+                    "type": "string",
+                    "enum": ["careers_page", "job_listing", "contact_email", "none"],
+                },
+                "links": {"type": "array", "items": {"type": "string"}},
+                "emails": {"type": "array", "items": {"type": "string"}},
+                "evidence": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["opportunity_type", "evidence", "confidence"],
+        },
+    },
 ]
 
 
 class Provider:
-    def complete(self, system: str, messages: list[dict], *, model: str,
-                 use_tools: bool = True, force_tool: str | None = None,
-                 max_tokens: int = 1024, json_mode: bool = False) -> Turn:
+    def complete(
+        self,
+        system: str,
+        messages: list[dict],
+        *,
+        model: str,
+        use_tools: bool = True,
+        force_tool: str | None = None,
+        max_tokens: int = 1024,
+        json_mode: bool = False,
+    ) -> Turn:
         """json_mode: ask the provider to guarantee a JSON response where supported."""
         raise NotImplementedError
 
@@ -120,6 +167,7 @@ class Provider:
 class BedrockProvider(Provider):
     def __init__(self) -> None:
         import boto3
+
         self._client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
 
     @staticmethod
@@ -133,18 +181,18 @@ class BedrockProvider(Provider):
                 if m.get("text"):
                     content.append({"text": m["text"]})
                 for tu in m.get("tool_uses", []):
-                    content.append({"toolUse": {"toolUseId": tu.id, "name": tu.name,
-                                                "input": tu.input}})
+                    content.append({"toolUse": {"toolUseId": tu.id, "name": tu.name, "input": tu.input}})
                 out.append({"role": "assistant", "content": content or [{"text": ""}]})
             elif m["role"] == "tool":
-                content = [{"toolResult": {"toolUseId": r["id"],
-                                           "content": [{"json": r["output"]}]}}
-                           for r in m["results"]]
+                content = [
+                    {"toolResult": {"toolUseId": r["id"], "content": [{"json": r["output"]}]}} for r in m["results"]
+                ]
                 out.append({"role": "user", "content": content})
         return out
 
-    def complete(self, system, messages, *, model, use_tools=True,
-                 force_tool=None, max_tokens=1024, json_mode=False) -> Turn:
+    def complete(
+        self, system, messages, *, model, use_tools=True, force_tool=None, max_tokens=1024, json_mode=False
+    ) -> Turn:
         # Claude has no JSON mode flag; the prompt already demands JSON.
         kwargs = {
             "modelId": model,
@@ -154,23 +202,30 @@ class BedrockProvider(Provider):
         if system:
             kwargs["system"] = [{"text": system}]
         if use_tools:
-            tool_config = {"tools": [{"toolSpec": {
-                "name": t["name"], "description": t["description"],
-                "inputSchema": {"json": t["parameters"]}}} for t in TOOLS]}
+            tool_config = {
+                "tools": [
+                    {
+                        "toolSpec": {
+                            "name": t["name"],
+                            "description": t["description"],
+                            "inputSchema": {"json": t["parameters"]},
+                        }
+                    }
+                    for t in TOOLS
+                ]
+            }
             if force_tool:
                 tool_config["toolChoice"] = {"tool": {"name": force_tool}}
             kwargs["toolConfig"] = tool_config
         resp = _with_retry(lambda: self._client.converse(**kwargs), "bedrock.converse")
         usage = resp.get("usage", {})
-        turn = Turn(input_tokens=usage.get("inputTokens", 0),
-                    output_tokens=usage.get("outputTokens", 0))
+        turn = Turn(input_tokens=usage.get("inputTokens", 0), output_tokens=usage.get("outputTokens", 0))
         for c in resp["output"]["message"]["content"]:
             if "text" in c:
                 turn.text += c["text"]
             elif "toolUse" in c:
                 tu = c["toolUse"]
-                turn.tool_uses.append(ToolUse(tu["toolUseId"], tu["name"],
-                                              tu.get("input", {})))
+                turn.tool_uses.append(ToolUse(tu["toolUseId"], tu["name"], tu.get("input", {})))
         return turn
 
 
@@ -187,9 +242,10 @@ class GeminiProvider(Provider):
             secret_name = os.environ.get("FMAJ_GCP_SA_SECRET")
             if secret_name:
                 import boto3
-                key_json = boto3.client(
-                    "secretsmanager", region_name=config.AWS_REGION
-                ).get_secret_value(SecretId=secret_name)["SecretString"]
+
+                key_json = boto3.client("secretsmanager", region_name=config.AWS_REGION).get_secret_value(
+                    SecretId=secret_name
+                )["SecretString"]
                 path = "/tmp/gcp-sa.json"  # noqa: S108 — Lambda's only writable dir
                 with open(path, "w") as f:
                     f.write(key_json)
@@ -207,11 +263,11 @@ class GeminiProvider(Provider):
 
     def _to_contents(self, messages: list[dict]) -> list:
         from google.genai import types
+
         contents = []
         for m in messages:
             if m["role"] == "user":
-                contents.append(types.Content(role="user",
-                    parts=[types.Part.from_text(text=m["text"])]))
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=m["text"])]))
             elif m["role"] == "assistant":
                 parts = []
                 if m.get("text"):
@@ -223,14 +279,15 @@ class GeminiProvider(Provider):
                     parts.append(fp)
                 contents.append(types.Content(role="model", parts=parts))
             elif m["role"] == "tool":
-                parts = [types.Part.from_function_response(
-                    name=r["name"], response=r["output"]) for r in m["results"]]
+                parts = [types.Part.from_function_response(name=r["name"], response=r["output"]) for r in m["results"]]
                 contents.append(types.Content(role="user", parts=parts))
         return contents
 
-    def complete(self, system, messages, *, model, use_tools=True,
-                 force_tool=None, max_tokens=1024, json_mode=False) -> Turn:
+    def complete(
+        self, system, messages, *, model, use_tools=True, force_tool=None, max_tokens=1024, json_mode=False
+    ) -> Turn:
         from google.genai import types
+
         cfg: dict = {"temperature": 0, "max_output_tokens": max_tokens}
         if system:
             cfg["system_instruction"] = system
@@ -239,9 +296,16 @@ class GeminiProvider(Provider):
             # thinking, so callers should also allow generous max_tokens.
             cfg["response_mime_type"] = "application/json"
         if use_tools:
-            cfg["tools"] = [types.Tool(function_declarations=[
-                types.FunctionDeclaration(name=t["name"], description=t["description"],
-                                          parameters=t["parameters"]) for t in TOOLS])]
+            cfg["tools"] = [
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name=t["name"], description=t["description"], parameters=t["parameters"]
+                        )
+                        for t in TOOLS
+                    ]
+                )
+            ]
             mode = "ANY" if force_tool else "AUTO"
             fcc = types.FunctionCallingConfig(mode=mode)
             if force_tool:
@@ -249,9 +313,10 @@ class GeminiProvider(Provider):
             cfg["tool_config"] = types.ToolConfig(function_calling_config=fcc)
         resp = _with_retry(
             lambda: self._client.models.generate_content(
-                model=model, contents=self._to_contents(messages),
-                config=types.GenerateContentConfig(**cfg)),
-            "gemini.generate_content")
+                model=model, contents=self._to_contents(messages), config=types.GenerateContentConfig(**cfg)
+            ),
+            "gemini.generate_content",
+        )
 
         turn = Turn()
         um = getattr(resp, "usage_metadata", None)
@@ -265,9 +330,14 @@ class GeminiProvider(Provider):
                     turn.text += part.text
                 fc = getattr(part, "function_call", None)
                 if fc:
-                    turn.tool_uses.append(ToolUse(
-                        id=f"{fc.name}-{i}", name=fc.name, input=dict(fc.args or {}),
-                        signature=getattr(part, "thought_signature", None)))
+                    turn.tool_uses.append(
+                        ToolUse(
+                            id=f"{fc.name}-{i}",
+                            name=fc.name,
+                            input=dict(fc.args or {}),
+                            signature=getattr(part, "thought_signature", None),
+                        )
+                    )
         return turn
 
 

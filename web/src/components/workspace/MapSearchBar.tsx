@@ -135,18 +135,28 @@ export default function MapSearchBar({
    * prompts), so we gate on the Permissions API and centre silently only on
    * "granted". "prompt"/"denied", no Permissions API, or an insecure context all
    * fall through to the manual "Use my location" button — no automatic prompt.
-   * A ref guards against a prop change or StrictMode double-invoke re-firing it.
+   *
+   * The ref is claimed only when we actually commit to locating, *after* the
+   * permission query resolves — never up front. Claiming it up front deadlocks
+   * under React StrictMode (`next dev`): the first pass sets the ref and is then
+   * unmounted, so its cleanup cancels the in-flight query, and the remount sees
+   * the ref already set and never queries again. Auto-locate then never fires in
+   * development and the map sits on the fallback centre. Claiming it late means
+   * the cancelled pass leaves no trace and the remount does the real work, while
+   * the ref still stops a `locate` identity change from re-firing it later.
    */
   const autoLocatedRef = useRef(false);
   useEffect(() => {
     if (!autoLocate || autoLocatedRef.current) return;
     if (typeof navigator === "undefined" || !navigator.permissions?.query) return;
-    autoLocatedRef.current = true;
     let cancelled = false;
     void navigator.permissions
       .query({ name: "geolocation" })
       .then((status) => {
-        if (!cancelled && status.state === "granted") locate();
+        if (cancelled || autoLocatedRef.current) return;
+        if (status.state !== "granted") return;
+        autoLocatedRef.current = true;
+        locate();
       })
       // Some browsers reject the "geolocation" name — treat as "don't auto-ask".
       .catch(() => {});

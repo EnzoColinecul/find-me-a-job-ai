@@ -79,8 +79,43 @@ def test_adzuna_parses_results(monkeypatch) -> None:
             },
         )
     )
-    r = impl.search_jobs_adzuna("Cafe X", "chef")
+    r = impl.search_jobs_adzuna("Cafe X", "chef", country_code="au")
     assert r.ok and r.data["jobs"][0]["title"] == "Chef"
+
+
+@respx.mock
+def test_adzuna_queries_the_company_s_own_country(monkeypatch) -> None:
+    """The country comes from Places, not from a hardcoded `au` in the URL."""
+    monkeypatch.setenv("FMAJ_ADZUNA_APP_ID", "id")
+    monkeypatch.setenv("FMAJ_ADZUNA_APP_KEY", "key")
+    route = respx.get(
+        url__startswith="https://api.adzuna.com/v1/api/jobs/gb/search/1"
+    ).mock(return_value=httpx.Response(200, json={"results": []}))
+
+    r = impl.search_jobs_adzuna("Cafe X", "chef", country_code="GB")
+
+    assert r.ok and route.called
+
+
+def test_adzuna_refuses_a_country_it_does_not_index() -> None:
+    """Better a readable refusal than a 404 the model has to interpret."""
+    r = impl.search_jobs_adzuna("Cafe X", "chef", country_code="jp")
+    assert not r.ok and "JP" in r.reason
+
+
+def test_adzuna_refuses_when_the_country_is_unknown() -> None:
+    """Unknown must never fall back to Australia — that was the original bug."""
+    r = impl.search_jobs_adzuna("Cafe X", "chef", country_code=None)
+    assert not r.ok and "country" in r.reason.lower()
+
+
+def test_seek_is_skipped_outside_australia() -> None:
+    """Seek has no employer pages abroad, so don't spend a tool call finding out."""
+    r = impl.find_seek_company_page("Cafe X", country_code="us")
+    assert not r.ok and "Australia" in r.reason
+
+    r = impl.find_seek_company_page("Cafe X", country_code=None)
+    assert not r.ok and "Australia" in r.reason
 
 
 @respx.mock
@@ -122,7 +157,7 @@ def test_seek_company_page_returns_url_when_it_has_vacancies() -> None:
                  '<div data-automation="jobTitle">C</div>',
         )
     )
-    r = impl.find_seek_company_page("Virtual IT Group")
+    r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
     assert r.ok
     assert r.data["url"] == url
     assert r.data["job_count"] == 3
@@ -142,7 +177,7 @@ def test_seek_company_page_with_no_results_is_rejected() -> None:
             200, html="<h1>No matching search results</h1>" + "<div>filler</div>" * 500
         )
     )
-    r = impl.find_seek_company_page("Boxtech")
+    r = impl.find_seek_company_page("Boxtech", country_code="au")
     assert not r.ok
     assert "no current listings" in r.reason
 
@@ -155,7 +190,7 @@ def test_seek_company_page_fails_closed_when_markers_are_missing() -> None:
     respx.get("https://au.seek.com/Redesigned-Co-jobs/at-this-company").mock(
         return_value=httpx.Response(200, html="<main>totally new markup</main>")
     )
-    r = impl.find_seek_company_page("Redesigned Co")
+    r = impl.find_seek_company_page("Redesigned Co", country_code="au")
     assert not r.ok
     assert "could not confirm" in r.reason
 
@@ -167,7 +202,7 @@ def test_seek_company_page_404_is_not_raised() -> None:
     respx.get("https://au.seek.com/Ghost-Co-jobs/at-this-company").mock(
         return_value=httpx.Response(404)
     )
-    r = impl.find_seek_company_page("Ghost Co")
+    r = impl.find_seek_company_page("Ghost Co", country_code="au")
     assert not r.ok and "404" in r.reason
 
 
@@ -178,6 +213,6 @@ def test_seek_company_page_respects_robots() -> None:
     respx.get("https://au.seek.com/robots.txt").mock(
         return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
     )
-    r = impl.find_seek_company_page("Virtual IT Group")
+    r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
     assert not r.ok
     assert "robots" in r.reason

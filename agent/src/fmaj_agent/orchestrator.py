@@ -44,14 +44,28 @@ _SYSTEM = (Path(__file__).parent / "prompts" / "system.md").read_text()
 #: separately — see the arithmetic in config.py.
 _METERED = {"web_search": lambda: config.MAX_WEB_SEARCHES}
 
-_DISPATCH = {
-    "fetch_url": lambda a: fetch_url(a["url"]),
-    "find_careers_link": lambda a: find_careers_link(a["url"]),
-    "search_jobs_adzuna": lambda a: search_jobs_adzuna(a["company"], a["role"]),
-    "find_seek_company_page": lambda a: find_seek_company_page(a["company"]),
-    "web_search": lambda a: web_search(a["query"]),
-    "extract_emails": lambda a: extract_emails(a["url"]),
-}
+def _dispatch_for(company: Company) -> dict:
+    """Tool name -> callable, with this company's context already bound.
+
+    The country is bound here rather than exposed as a tool argument on purpose:
+    it is a fact we read off the Places result, and the model has no way to know
+    it better than we do. Letting it pass a country would let a hallucinated "au"
+    send a Berlin bakery to the Australian job index — the exact failure that made
+    the app AU-only in the first place.
+    """
+    country = company.country_code
+    return {
+        "fetch_url": lambda a: fetch_url(a["url"]),
+        "find_careers_link": lambda a: find_careers_link(a["url"]),
+        "search_jobs_adzuna": lambda a: search_jobs_adzuna(
+            a["company"], a["role"], country_code=country
+        ),
+        "find_seek_company_page": lambda a: find_seek_company_page(
+            a["company"], country_code=country
+        ),
+        "web_search": lambda a: web_search(a["query"]),
+        "extract_emails": lambda a: extract_emails(a["url"]),
+    }
 
 
 @dataclass
@@ -174,6 +188,7 @@ def investigate(
     """
     budget = budget or NoSharedBudget()
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
+    dispatch = _dispatch_for(company)
     start = time.monotonic()
 
     def emit(tag: Tag, tool: str, meta: str = "") -> None:
@@ -196,7 +211,11 @@ def investigate(
         user = (
             f"Investigate this company for job opportunities.\n"
             f"Name: {company.name}\nWebsite: {company.website or 'unknown'}\n"
-            f"Address: {company.address}\nRoles: {', '.join(company.roles)}\n\n"
+            f"Address: {company.address}\nRoles: {', '.join(company.roles)}\n"
+            # The country is stated so web_search queries can be aimed at boards
+            # that actually cover it. Which country-specific tools are *available*
+            # is still enforced in code, not here — the tools refuse on their own.
+            f"Country: {(company.country_code or 'unknown').upper()}\n\n"
             "Find the best opportunity (live listing > careers page > contact email), "
             "then call report_findings."
         )
@@ -246,7 +265,7 @@ def investigate(
                                     "output": {"ok": False, "reason": denial}})
                     continue
 
-                result = _DISPATCH[tu.name](tu.input) if tu.name in _DISPATCH else None
+                result = dispatch[tu.name](tu.input) if tu.name in dispatch else None
                 output = result.model_dump() if result else {"ok": False, "reason": "unknown"}
                 tag, meta = summarise_tool_result(tu.name, tu.input, result)
                 emit(tag, tu.name, meta)
