@@ -58,6 +58,7 @@ def test_extract_emails_prefers_careers() -> None:
     r = impl.extract_emails("https://mail.example/contact")
     assert r.ok
     assert r.data["emails"][0] == "careers@mail.example"  # preferred first
+    assert r.data["recruitment"] == ["careers@mail.example"]
 
 
 @respx.mock
@@ -152,15 +153,16 @@ def test_seek_company_page_returns_url_when_it_has_vacancies() -> None:
     respx.get(url).mock(
         return_value=httpx.Response(
             200,
-            html='<div data-automation="jobTitle">A</div>'
-                 '<div data-automation="jobTitle">B</div>'
-                 '<div data-automation="jobTitle">C</div>',
+            html='<a data-automation="jobTitle" href="/job/1">A</a>'
+                 '<a data-automation="jobTitle" href="/job/2"><span>B</span></a>'
+                 '<div data-automation="jobTitle">  C  </div>',
         )
     )
     r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
     assert r.ok
     assert r.data["url"] == url
     assert r.data["job_count"] == 3
+    assert r.data["job_titles"] == ["A", "B", "C"]
 
 
 @respx.mock
@@ -216,3 +218,76 @@ def test_seek_company_page_respects_robots() -> None:
     r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
     assert not r.ok
     assert "robots" in r.reason
+
+
+@respx.mock
+def test_seek_job_titles_are_read_for_the_role_check() -> None:
+    """"3 vacancies" sent a software-developer search to Virtual IT Group whose
+    three vacancies were all other jobs. The titles are what makes it checkable.
+    """
+    impl._robot_cache.clear()
+    respx.get("https://au.seek.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://au.seek.com/Virtual-IT-Group-jobs/at-this-company").mock(
+        return_value=httpx.Response(200, html=(
+            '<a data-automation="jobTitle"><span>Service Desk</span> Analyst</a>'
+            '<a data-automation="jobTitle">Business Development Manager</a>'
+            '<a data-automation="jobTitle">Business Development Manager</a>'
+        ))
+    )
+    r = impl.find_seek_company_page("Virtual IT Group", country_code="au")
+    assert r.ok
+    # nested markup is flattened, whitespace collapsed, duplicates dropped
+    assert r.data["job_titles"] == ["Service Desk Analyst", "Business Development Manager"]
+    assert r.data["job_count"] == 3  # the raw marker count is still the honest total
+
+
+def test_seek_titles_survive_unparseable_html() -> None:
+    """A parser failure must not read as "no vacancies" — that fails the wrong way."""
+    html = '<a data-automation="jobTitle">Sous Chef</a'  # truncated on purpose
+    assert impl._seek_job_titles(html) == ["Sous Chef"]
+    assert impl._seek_job_titles("") == []
+
+
+@respx.mock
+def test_extract_emails_drops_mailboxes_nobody_reads_resumes_at() -> None:
+    """The reported case: `sales@trendzit.com.au` offered as a way into a company."""
+    impl._robot_cache.clear()
+    respx.get("https://trendz.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://trendz.example/contact").mock(
+        return_value=httpx.Response(200, html=(
+            "Sales: sales@trendz.example · Support: support@trendz.example · "
+            "Billing: accounts@trendz.example · noreply@trendz.example"
+        ))
+    )
+    r = impl.extract_emails("https://trendz.example/contact")
+    assert r.ok
+    assert r.data["emails"] == []          # the model never gets the option
+    assert r.data["hiring_signal"] is False
+
+
+@respx.mock
+def test_extract_emails_flags_a_page_that_invites_applications() -> None:
+    """Starboard IT: a general address, but the About page asks for resumes."""
+    impl._robot_cache.clear()
+    respx.get("https://star.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://star.example/about").mock(
+        return_value=httpx.Response(200, html=(
+            "<article><p>We are always keen to meet new talent. If you like the "
+            "look of us, please send us your resume — info@star.example</p></article>"
+        ))
+    )
+    r = impl.extract_emails("https://star.example/about")
+    assert r.ok
+    assert r.data["emails"] == ["info@star.example"]
+    assert r.data["recruitment"] == []      # generic mailbox…
+    assert r.data["hiring_signal"] is True  # …but the page asked for resumes
+
+
+def test_hiring_invitation_needs_a_phrase_not_a_keyword() -> None:
+    """A "Careers" nav item is not an invitation; "send us your resume" is."""
+    match = lambda t: bool(impl.HIRING_INVITATION.search(t))  # noqa: E731
+    assert match("please send us your resume")
+    assert match("We are currently hiring for several roles")
+    assert match("View our current vacancies")
+    assert not match("Home | About | Careers | Contact")
+    assert not match("Trendz IT Solutions provides managed IT services.")

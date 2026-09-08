@@ -51,6 +51,12 @@ class Company(BaseModel):
     # ~19 countries and Seek covers Australia only. None means "couldn't tell",
     # which the tools treat as "skip the country-specific boards", NOT as Australia.
     country_code: str | None = None
+    #: Which discovery call first surfaced this place — a Places type
+    #: ("nearby:cafe") or a text query ("text:software development company").
+    #: Diagnostic only, never persisted: without it a harness CSV can't say
+    #: whether a shortlist came from the types or the phrasings, which is
+    #: exactly the question when a role is returning the wrong companies.
+    discovery_source: str = ""
 
 
 class Findings(BaseModel):
@@ -61,6 +67,12 @@ class Findings(BaseModel):
     emails: list[str] = []
     evidence: str = Field(default="", description="Short justification of the finding")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: For `job_listing` only: the exact vacancy title the agent matched against
+    #: the role, copied from a tool result. It is what makes the claim checkable
+    #: — `orchestrator._verify_listing` re-judges it and downgrades the finding if
+    #: it isn't the role (or if no tool ever returned it). Not persisted; the
+    #: user-facing justification lives in `evidence`.
+    matched_title: str = Field(default="", description="Vacancy title matched to the role")
 
 
 class ToolResult(BaseModel):

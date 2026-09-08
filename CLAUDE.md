@@ -92,14 +92,58 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
   country → `ok=False` with a readable reason the model can route around, shown in
   the trace as `Skipping` — **never a silent fallback to Australia**. Adding
   `nz.seek.co.nz` needs its own robots.txt check first; don't assume it mirrors AU.
+- **Role matching (2026-09-03) — "is hiring" is not "is hiring for this role".**
+  A Melbourne *software developer* search returned Virtual IT Group with a Seek
+  link whose three vacancies were a Service Desk Analyst, a BDM and an Account
+  Manager. Nothing was broken: `find_seek_company_page` only ever counted
+  vacancies, so there was never a title to check. `role_match.py` is the fix — an
+  LLM judge (triage model, one batched call per company, cached) scoring each
+  vacancy title against the roles sought, with a verbatim-substring fast path in
+  front of it and `FMAJ_ROLE_MATCH_THRESHOLD` (default **0.8**) as the bar. Two
+  enforcement points, **both in code, not the prompt**: `role_match.GATES` filters
+  `find_seek_company_page` and `search_jobs_adzuna` before the model sees them (a
+  refusal names the rejected titles, so the agent keeps looking instead of
+  reporting), and `orchestrator._verify_listing` re-checks the `matched_title` the
+  model must now supply with any `job_listing` — one it never saw, or one that
+  isn't the role, is downgraded. `web_search` is deliberately **not** gated: its
+  result titles are page titles, not vacancy titles, so filtering on them would
+  reject good links; those listings are caught by the report gate instead.
+  **Fails closed** — an unreachable judge, unparseable output or unreadable titles
+  all mean "no match", like the markup check next to it. Downgrade ladder (the
+  product decision): a careers page or a contact email still earns the company a
+  place in the results, nothing at all drops it, and links to a *board*
+  (`_BOARD_HOSTS`) are dropped on downgrade while the company's own site survives
+  — a Seek link with no matching vacancy says nothing. `FMAJ_ROLE_MATCH_THRESHOLD`
+  is a **confidence** threshold, not a measured accuracy; `evals/golden.yaml` is
+  what measures the latter, and it has not been re-run against this gate yet.
+- **Contact emails are gated too (2026-09-03) — an address is not a lead.**
+  `sales@trendzit.com.au` was reported as a way into a company whose site was
+  down, scraped out of a directory, with no vacancy anywhere. Three tiers, all
+  deterministic, no LLM call: `impl.NEVER_EMAIL` (`sales@`, `support@`,
+  `billing@`, `noreply@` …) is dropped inside `extract_emails` so the model never
+  sees it; `impl.RECRUITMENT_EMAIL` (`careers@`, `hr@`, `recruit*@` …) stands on
+  its own; everything else (`info@`, `contact@` — often the ONLY address a cafe
+  publishes, and hospitality is the core market) counts only when a page we
+  fetched carried an actual invitation, `impl.HIRING_INVITATION` ("please send us
+  your resume", "we're hiring" — phrase-level on purpose, a "Careers" nav item is
+  not an invitation). `orchestrator._verify_email` also demands provenance: the
+  address must have come back from `extract_emails`, not out of a `web_search`
+  snippet. Nothing survives → `none` and the company drops, links included — a
+  `contact_email` finding only ever links to the contact page it read.
+  `_verify()` is the one door both this and the listing gate run behind, so no
+  report path can skip either.
 - Conduct: robots.txt respected, honest UA, **never scrape Seek/LinkedIn for listing
   content** (links only via SerpAPI `site:` queries) — ToS requirement, don't "fix"
-  this. **One deliberate exception** (2026-08-11): `find_seek_company_page` GETs
-  `au.seek.com/{slug}-jobs/at-this-company` to count job markers and decide whether
-  the page is worth linking. It keeps only the count — no titles or descriptions —
-  and that path carries no `/job/` segment and no query string, so Seek's robots.txt
-  allows it for our UA (`*/job/`, `*?`, `/graphql`, `/api/jobsearch/` are the
-  disallowed ones). Widening this into reading listings would breach the rule.
+  this. **One deliberate exception** (2026-08-11, widened 2026-09-03):
+  `find_seek_company_page` GETs `au.seek.com/{slug}-jobs/at-this-company` to count
+  job markers and, since the role-match gate, to read the vacancy **titles** — the
+  minimum needed to answer "is this the job the user asked for?", which counting
+  alone could not. Titles only: no descriptions, salaries or dates, nothing beyond
+  that one page, no `/job/` page ever fetched, and nothing persisted — the titles
+  live in the tool result for the run and are gone with it. That path carries no
+  `/job/` segment and no query string, so Seek's robots.txt allows it for our UA
+  (`*/job/`, `*?`, `/graphql`, `/api/jobsearch/` are the disallowed ones). Reading
+  a listing's body, or fetching one, would still breach the rule.
 - **Trace (`trace.py`) feeds the "nothing hidden" panel, so it must not lie.**
   `TOOL_LABELS` is the one place internal names become display names, and every
   label must name a call we really make (the mockup's `places.details` row is
@@ -115,9 +159,14 @@ cd infra && cdk deploy 'Fmaj-Test/Data' --profile fmaj-deploy   # cdk is a Node 
                                                                 # NEVER `uv run cdk`
 cd agent && AWS_PROFILE=fmaj-deploy uv run python scripts/discovery_harness.py \
     --suburb "Surry Hills:-33.8845:151.2119" --role chef        # discovery QA → CSV
-cd agent && AWS_PROFILE=fmaj-deploy GOOGLE_APPLICATION_CREDENTIALS=../project-*.json \
+# One-company agent run. NOTE the credentials path is written out in full: a
+# glob in a `VAR=value` prefix is NOT expanded by the shell, so
+# `GOOGLE_APPLICATION_CREDENTIALS=../project-*.json` reaches google.auth as a
+# literal string and dies with "File ../project-*.json was not found."
+cd agent && AWS_PROFILE=fmaj-deploy \
+    GOOGLE_APPLICATION_CREDENTIALS=../project-7187e8cf-43d5-451b-be4-84a9aac3c5df.json \
     FMAJ_LLM_PROVIDER=gemini uv run python -m fmaj_agent.run \
-    --name "X" --website https://x.com --role chef              # one-company agent run
+    --name "X" --website https://x.com --role chef --country au
 # Reset the free-search quota after testing:
 aws dynamodb update-item --table-name fmaj-test-main \
   --key '{"PK":{"S":"USER#<sub>"},"SK":{"S":"PROFILE"}}' \
@@ -126,9 +175,41 @@ aws dynamodb update-item --table-name fmaj-test-main \
   --profile fmaj-deploy --region ap-southeast-2
 ```
 
-Tests: api 24, agent 56 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
+Tests: api 24, agent 124 (pytest; agent uses PYTHONPATH=src or uv). Web: `npx tsc
 --noEmit` + `npm run lint`. Python target is 3.12+ but avoid 3.11+-only stdlib
 (e.g. use `str, Enum` not `StrEnum`) for tooling compatibility.
+
+**Office roles are described, not typed (2026-09-03).** Google has a venue type
+for a cafe and none for a software company, so hospitality/retail/trades get
+precise Nearby results while office roles fall back to Text Search — where the
+candidate pool is only as good as the phrase. `it support`'s lone "IT services
+company" is why a Melbourne *software developer* search returned nothing but
+managed service providers: the query asked for MSPs and Google obliged, and no
+amount of pagination or match-gate tuning helps when the right companies were
+never in the pool. `role_mapping.yaml` now takes `text_queries` (a list) as well
+as `text_query`, and several phrasings share the page budget — three queries one
+page deep beat one query three pages deep, because deeper pages are the same
+query's long tail.
+
+**A broad Nearby type next to text queries is worse than no type at all**
+(graded, Melbourne CBD, 2026-09-03). `software developer` was tried with
+`types: [corporate_office, consultant]`: those two took **39 of the 40**
+shortlist places — migration agents, naturopaths, accountants, virtual-office
+registrations sharing one Bourke St address — leaving exactly one text-search
+result (Whispir) standing. The mechanism is ranking, not relevance: Nearby
+returns the 20 NEAREST of each type, all within metres of a CBD pin, so
+`ranked[:max_companies]` cut every genuine software company. Office roles
+therefore carry `types: []` and live on their phrasings. Re-graded text-only:
+**~85-90% plausible employers** (Whispir, Milanote, ELMO, ClickSend, Buildxact,
+Endava, TCS, SSW, TatvaSoft…), on par with the hospitality benchmark and up from
+roughly 5-10% with the types in. The three queries are complementary rather than
+redundant — "software company" surfaces product companies, "software development
+company" consultancies, "web development agency" small studios — which is the
+argument for `text_queries` being a list. The same crowding-out
+is latent for any role mixing both (`construction labourer`, `cleaner`) — check
+`stats["by_source"]` before assuming a role's text queries contribute anything.
+`Company.discovery_source` and the harness's `source` column exist for exactly
+that; `it support` (text-only) came back clean by comparison, all real IT firms.
 
 ## Role input (free text → LLM → confirm)
 
@@ -209,7 +290,21 @@ required by the Maps ToS** to stay visible and unobscured, so they cannot be
 removed. The Places autocomplete is a web component with its own Roboto/white
 styling — `globals.css` restyles it via `gmp-place-autocomplete` + `::part(input)`.
 
+**The base map is cloud-styled (2026-09-03).** `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID` is
+a real map ID from Map Management, associated with a style that hides Google's own
+POI icons (restaurants, museums, supermarkets…) — they competed with our numbered
+result pins. It replaced the literal `mapId="fmaj-search"`, which was never
+registered with Google, so the map ran on the default look and `AdvancedMarker` had
+no valid ID. Consequence: **a hardcoded `styles` prop is ignored on a cloud-styled
+map** — all base-map appearance lives in the console (edits apply with no deploy),
+and the map ID must be set in every environment (`web/.env.local`, Amplify env vars)
+or `AdvancedMarker` breaks. `clickableIcons={false}` only stopped POIs being
+*clicked*; it never hid them.
+
 `web/src/lib/links.ts` classifies result links by URL pattern into badge types.
+A "Live listing" badge is only as honest as `opportunity_type`, which is why the
+role-match gate lives in the agent and not here — the frontend cannot tell a Seek
+employer page with a matching vacancy from one without.
 **Keep it conservative** — an unrecognised path gets a generic badge, never an
 overclaimed "Live listing". The badge is only useful if it's trustworthy without
 clicking. Revisit only if the agent starts returning `{url, kind, label}` from
@@ -246,6 +341,16 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   `MAX_COMPANIES` (this is exactly what limited a 5km Melbourne CBD search to 20).
   3-5 calls/search on the Pro SKU is ~1000 searches/mo, so it's effectively free;
   a test asserts the call count. Don't "optimise" it back into one call.
+- **Text Search paginates; Nearby does not (2026-09-03).** `maxResultCount` is
+  documented as "between 1 and 20 (default)" and Nearby has no page token, so 20
+  per request is Google's ceiling, not ours — raising the number does nothing.
+  Breadth comes from more requests. Nearby gets one call per type (above); Text
+  Search now follows `nextPageToken` up to `discovery.MAX_TEXT_PAGES` (3), but
+  **only for roles with no Places types**, since those reach the API through Text
+  Search alone. That was a silent 20-candidate ceiling on `MAX_COMPANIES` for
+  `it support` and for every uncurated label — i.e. every office role, "software
+  developer" included. Roles that have types stay on one text page; they already
+  have 20 per type and each page is a billed call.
 - Places (New): search calls use **Pro-only field masks** (5K free/mo); `websiteUri`
   needs **Enterprise** Place Details (1K free/mo → the real monthly ceiling, ~25-33
   searches) so Details is called ONLY for the ≤40 shortlisted companies.
@@ -308,6 +413,25 @@ body text — decorative use only. Body copy uses `slate-muted` or `ink`.
   (hardening + private beta).**
 
 ## Known state / gotchas
+
+- **⚠️ The role-match gate (2026-09-03) changed the `agent` package**, so
+  `Fmaj-Test/Pipeline` must be redeployed before a search picks it up. The Seek
+  title selector IS verified against the real page (`scripts/check_seek_titles.py
+  "Virtual IT Group"` on a normal network — the sandbox egress proxy blocks
+  `au.seek.com` — returned `job_count=1, "Product Manager"`, which is also the
+  reported bug in miniature: a live vacancy that is not the role). A live agent run
+  against that company then returned `contact_email` + `careers@vitg.com.au` with
+  **no Seek link** — the reported bug, fixed end to end. Still outstanding: the
+  eval set has not been re-run against the gate. Re-run
+  `scripts/check_seek_titles.py` first if AU listings ever go quiet: an empty title
+  list with a non-zero `job_count` means Seek's markup moved, and the gate fails
+  closed (safe, but the source goes dark).
+- That run finished via `_force_report` — 8 tool calls, the whole `MAX_TOOL_CALLS`
+  budget, and both per-company `web_search` calls. Not the gate's doing (it costs
+  an LLM call, not a tool call): `virtualitgroup.com.au` redirects to `vitg.com.au`,
+  so the agent spent its first `find_careers_link` on the old domain and needed a
+  `web_search` to find the real one. Worth remembering before reading a forced
+  report as a budget problem.
 
 - **⚠️ Going worldwide touched the `agent` package** (models, discovery, places,
   tools, orchestrator, prompt), so `Fmaj-Test/Pipeline` **must be redeployed** before

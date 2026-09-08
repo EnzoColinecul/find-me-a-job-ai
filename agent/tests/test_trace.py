@@ -30,7 +30,10 @@ def test_every_label_names_a_tool_we_actually_run() -> None:
     dispatch = _dispatch_for(
         Company(place_id="p", name="X", address="", roles=["chef"], country_code="au")
     )
-    known = set(dispatch) | {"discovery", "triage", "report_findings"}
+    # `role_match` is not a model-callable tool but it IS a real call the agent
+    # makes — an LLM judging vacancy titles against the role — and it gets its
+    # own row when it rejects a claim, so it belongs here.
+    known = set(dispatch) | {"discovery", "triage", "report_findings", "role_match"}
     assert set(TOOL_LABELS) == known
     assert "places.details" not in TOOL_LABELS.values()
 
@@ -55,6 +58,8 @@ def test_empty_results_never_report_found() -> None:
         ("find_careers_link", {"url": ""}),
         # An employer page we couldn't verify must never read as a find.
         ("find_seek_company_page", {"job_count": 0}),
+        # Vacancies exist but the role gate hasn't cleared any -> not a find.
+        ("find_seek_company_page", {"job_count": 3}),
     ]:
         tag, _ = summarise_tool_result(name, {}, _Result(ok=True, **payload))
         assert tag is Tag.CHECKING, name
@@ -66,8 +71,27 @@ def test_real_results_report_found_with_a_count() -> None:
     )
     assert tag is Tag.FOUND and meta == "2 matches"
 
-    tag, meta = summarise_tool_result("extract_emails", {}, _Result(ok=True, emails=["a@b.c"]))
-    assert tag is Tag.FOUND and meta == "1 email"
+    tag, meta = summarise_tool_result(
+        "extract_emails", {},
+        _Result(ok=True, emails=["careers@b.c"], recruitment=["careers@b.c"]),
+    )
+    assert tag is Tag.FOUND and meta == "1 recruitment email"
+
+
+def test_a_bare_address_is_not_a_find() -> None:
+    """"1 email" read as success for a `sales@` scraped off a dead site. An
+    address only counts when a resume could plausibly reach a reader."""
+    tag, meta = summarise_tool_result(
+        "extract_emails", {}, _Result(ok=True, emails=["info@b.c"], recruitment=[]),
+    )
+    assert tag is Tag.CHECKING and "no hiring signal" in meta
+
+    # …unless the page it came from invited applications.
+    tag, meta = summarise_tool_result(
+        "extract_emails", {},
+        _Result(ok=True, emails=["info@b.c"], recruitment=[], hiring_signal=True),
+    )
+    assert tag is Tag.FOUND and "invites applications" in meta
 
 
 def test_fetch_url_meta_is_a_bare_host() -> None:
@@ -87,3 +111,13 @@ def test_step_item_uses_the_friendly_label() -> None:
     assert item["tool"] == "fetch_page"
     assert item["tag"] == "checking"
     assert item["at"]
+
+
+def test_seek_meta_names_the_matches_not_the_vacancy_count() -> None:
+    """"3 Seek vacancies" for three off-role jobs is exactly the over-reporting
+    this panel exists to avoid."""
+    tag, meta = summarise_tool_result(
+        "find_seek_company_page", {},
+        _Result(ok=True, job_count=3, matching_count=1),
+    )
+    assert tag is Tag.FOUND and meta == "1 of 3 match the role"

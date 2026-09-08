@@ -11,10 +11,12 @@ Pipeline per search:
 
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 
 from fmaj_agent import config, mapping
 from fmaj_agent.models import Company, RoleSpec
+from fmaj_agent import places as places_mod
 from fmaj_agent.places import PlacesClient
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,16 @@ logger = logging.getLogger(__name__)
 #: (1K/month) and one search must never be able to eat the monthly quota.
 #: `FMAJ_MAX_COMPANIES=0` means "no PoC limit", not "no limit at all".
 HARD_MAX_COMPANIES = 40
+
+#: Text Search pages to pull for a role Nearby cannot serve. A role with no
+#: Places types reaches the API through Text Search alone, and one page is 20
+#: places — so `MAX_COMPANIES=40` was unreachable for `it support`, or for any
+#: label not in `role_mapping.yaml` (which is every office role: "software
+#: developer" text-searches, it has no venue type). Roles that DO have types
+#: already get 20 per type from Nearby, so they stay on one page and pay for one
+#: call. Capped because each page is a billed request and the shortlist is
+#: `MAX_COMPANIES` long anyway.
+MAX_TEXT_PAGES = 3
 
 
 @dataclass
@@ -60,8 +72,9 @@ def _country_code(place: dict) -> str | None:
     return None
 
 
-def _to_candidate(place: dict, roles: list[str]) -> dict:
+def _to_candidate(place: dict, roles: list[str], source: str = "") -> dict:
     return {
+        "source": source,
         "place_id": place["id"],
         "name": (place.get("displayName") or {}).get("text", ""),
         "address": place.get("formattedAddress", ""),
@@ -123,7 +136,7 @@ def discover(
         plan = mapping.resolve(spec.mapping_key)
         if not plan.curated and spec.label != spec.mapping_key:
             plan = mapping.resolve(spec.label)
-        raw: list[dict] = []
+        raw: list[tuple[dict, str]] = []
         # ONE CALL PER TYPE, not one call with every type in it.
         #
         # Nearby Search (New) returns at most 20 places and has no pagination, so
@@ -140,11 +153,27 @@ def discover(
         # still only called for the shortlist, so this doesn't touch the
         # expensive half of discovery.
         for place_type in plan.types:
-            raw.extend(client.search_nearby(lat, lng, radius_m, [place_type]))
-        if plan.text_query:
-            raw.extend(client.search_text(plan.text_query, lat, lng, radius_m))
-        for place in raw:
-            cand = _to_candidate(place, labels)
+            raw.extend(
+                (p, f"nearby:{place_type}")
+                for p in client.search_nearby(lat, lng, radius_m, [place_type])
+            )
+        # Only pay for extra pages when Text Search is the ONLY source for this
+        # role; with types in hand, Nearby has already supplied breadth. Several
+        # queries share the page budget between them — three phrasings of one
+        # page each beat one phrasing three pages deep, because the deeper pages
+        # are the same query's long tail while a different phrasing finds
+        # companies the first one never described.
+        pages = 1
+        if plan.text_queries and not plan.types:
+            per_query = places_mod.PAGE_SIZE * len(plan.text_queries)
+            pages = max(1, min(MAX_TEXT_PAGES, -(-max_companies // per_query)))
+        for query in plan.text_queries:
+            raw.extend(
+                (p, f"text:{query}")
+                for p in client.search_text(query, lat, lng, radius_m, max_pages=pages)
+            )
+        for place, source in raw:
+            cand = _to_candidate(place, labels, source)
             if cand["lat"] is None or not cand["name"]:
                 continue
             existing = candidates.get(cand["place_id"])
@@ -188,6 +217,7 @@ def discover(
                 lat=cand["lat"],
                 lng=cand["lng"],
                 country_code=cand.get("country_code") or search_country,
+                discovery_source=cand.get("source", ""),
             )
         )
 
@@ -197,6 +227,17 @@ def discover(
         "within_radius": len(ranked),
         "shortlisted": len(companies),
         "with_website": sum(1 for c in companies if c.website),
+        # Which call earned each place in the SHORTLIST — not the raw pool.
+        # Distance ranking means a dense Nearby type can crowd the text queries
+        # out of the cut entirely, so "we ran three queries" is not evidence any
+        # of their results survived. Melbourne CBD x software developer: 39 of
+        # 40 came from two Nearby types and exactly one from three text queries.
+        "by_source": dict(
+            sorted(
+                Counter(c.discovery_source or "unknown" for c in companies).items(),
+                key=lambda kv: -kv[1],
+            )
+        ),
         # Logged so a disappointing overseas search is diagnosable: "no listings"
         # reads very differently once you can see we resolved the wrong country,
         # or none at all.

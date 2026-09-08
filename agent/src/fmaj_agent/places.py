@@ -61,6 +61,13 @@ DETAILS_FIELD_MASK = "id,websiteUri,nationalPhoneNumber"
 
 MAX_RADIUS_M = 50_000
 
+#: Both Places search endpoints return at most 20 places per request — that is
+#: Google's ceiling, not a setting of ours (`maxResultCount` is documented as
+#: "between 1 and 20 (default)"). Raising it does nothing. Breadth comes from
+#: making more requests: one Nearby call per type, and — since Text Search alone
+#: supports `nextPageToken` — more than one page of text results.
+PAGE_SIZE = 20
+
 
 @dataclass
 class PlacesStats:
@@ -89,8 +96,15 @@ class PlacesClient:
             "Content-Type": "application/json",
         }
 
-    def search_nearby(self, lat: float, lng: float, radius_m: float, included_types: list[str]) -> list[dict]:
-        """Nearby Search (New). Max 20 results per request, no pagination."""
+    def search_nearby(
+        self, lat: float, lng: float, radius_m: float, included_types: list[str]
+    ) -> list[dict]:
+        """Nearby Search (New). Max 20 per request (Google's ceiling), no pagination.
+
+        `maxResultCount` is documented as "between 1 and 20 (default)", so the 20
+        below is not a tuning knob — raising it changes nothing. Breadth comes
+        from `discovery` calling this once per place type.
+        """
         self.stats.nearby_calls += 1
         body = {
             "includedTypes": included_types,
@@ -111,26 +125,54 @@ class PlacesClient:
         )
         return _check(resp).json().get("places", [])
 
-    def search_text(self, query: str, lat: float, lng: float, radius_m: float) -> list[dict]:
-        """Text Search (New), single page (20). Bias — results may fall outside radius."""
-        self.stats.text_calls += 1
-        body = {
-            "textQuery": query,
-            "pageSize": 20,
-            "locationBias": {
-                "circle": {
-                    "center": {"latitude": lat, "longitude": lng},
-                    "radius": min(radius_m, MAX_RADIUS_M),
-                }
-            },
-        }
-        resp = httpx.post(
-            f"{BASE}/places:searchText",
-            json=body,
-            headers=self._headers(SEARCH_FIELD_MASK),
-            timeout=self.timeout,
-        )
-        return _check(resp).json().get("places", [])
+    def search_text(
+        self, query: str, lat: float, lng: float, radius_m: float, max_pages: int = 1
+    ) -> list[dict]:
+        """Text Search (New). Bias — results may fall outside radius.
+
+        **Unlike Nearby, this one paginates.** `pageSize` maxes out at 20 per
+        request for both endpoints, but Text Search returns a `nextPageToken`
+        and Nearby has no pagination at all, so a text-only role was silently
+        capped at 20 candidates however high `MAX_COMPANIES` was set — the same
+        shape of bug as the bundled Nearby call, just on the other endpoint.
+        Roles with no Places types (`it support`, anything uncurated) reach the
+        API through here ONLY, so for them this cap *was* the search.
+
+        Each page is a separate billed request, on the Pro SKU (5K/month free),
+        so callers ask for the depth they need rather than paging blindly —
+        see `discovery`, which only pages for roles Nearby can't serve.
+
+        Google requires the rest of the request to be unchanged when a
+        `pageToken` is sent, so the body is rebuilt identically each time.
+        """
+        places: list[dict] = []
+        token: str | None = None
+        for _ in range(max(1, max_pages)):
+            self.stats.text_calls += 1
+            body = {
+                "textQuery": query,
+                "pageSize": 20,
+                "locationBias": {
+                    "circle": {
+                        "center": {"latitude": lat, "longitude": lng},
+                        "radius": min(radius_m, MAX_RADIUS_M),
+                    }
+                },
+            }
+            if token:
+                body["pageToken"] = token
+            resp = httpx.post(
+                f"{BASE}/places:searchText",
+                json=body,
+                headers=self._headers(SEARCH_FIELD_MASK),
+                timeout=self.timeout,
+            )
+            data = _check(resp).json()
+            places.extend(data.get("places", []))
+            token = data.get("nextPageToken")
+            if not token:
+                break
+        return places
 
     def place_details(self, place_id: str) -> dict:
         """Enterprise-tier details (websiteUri, phone). SHORTLIST ONLY — 1K free/mo."""
