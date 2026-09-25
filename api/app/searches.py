@@ -312,6 +312,44 @@ def create_search(sub: str, req: SearchRequest) -> dict:
         _release_search_lease(sub)
         raise
 
+    # The start of the search's Langfuse trace. Pipeline Lambdas join the same
+    # trace by deriving its id from search_id. Only ids and parameters that
+    # say nothing about the user are recorded — no sub, no coordinates, no
+    # free text. Tracing failures never reach the request (observability.py).
+    # Imported here, not at module top: fmaj_agent.config reads the environment
+    # at import time, after app.settings has loaded api/.env.
+    from fmaj_agent import config as agent_config
+    from fmaj_agent import observability
+
+    labels = [r.label for r in req.roles]
+    try:
+        with observability.observe(
+            "api.create_search",
+            search_id=search_id,
+            trace_meta={"search_id": search_id, "role": ", ".join(labels)[:200],
+                        "provider": agent_config.LLM_PROVIDER},
+            tags=[f"stage:{settings.stage}", f"provider:{agent_config.LLM_PROVIDER}",
+                  *[f"role:{r}" for r in labels[:3]]],
+            input={"roles": labels, "radius_km": req.radius_km},
+        ) as obs:
+            meta = _persist_and_start(sub, req, search_id)
+            obs.update(output={"status": meta["status"],
+                               "pipeline_started": bool(meta.get("execution_arn"))})
+            if not meta.get("execution_arn"):
+                obs.update(level="WARNING", status_message="pipeline not started")
+            return meta
+    finally:
+        # API Lambdas freeze between requests too; short wait, never blocking.
+        observability.flush(timeout=1.0)
+
+
+def _trace_id(search_id: str) -> str:
+    from fmaj_agent.observability import trace_id_for
+
+    return trace_id_for(search_id)
+
+
+def _persist_and_start(sub: str, req: SearchRequest, search_id: str) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     meta = {
         "PK": f"SEARCH#{search_id}",
@@ -326,6 +364,10 @@ def create_search(sub: str, req: SearchRequest) -> dict:
         "location_label": req.location_label or "",
         "status": "pending",
         "created_at": now,
+        # Where to find this search in Langfuse (deterministic from search_id;
+        # stored so it can be read straight off the item). Never returned by
+        # the API — get_search builds its response field by field.
+        "observability_trace_id": _trace_id(search_id),
     }
     _get_table().put_item(Item=meta)
 
@@ -368,6 +410,7 @@ def create_search(sub: str, req: SearchRequest) -> dict:
                 UpdateExpression="SET execution_arn = :a",
                 ExpressionAttributeValues={":a": execution["executionArn"]},
             )
+            meta["execution_arn"] = execution["executionArn"]
         except ClientError as exc:
             # Pipeline not deployed / bad ARN: don't fail the request. The search
             # record exists and stays "pending" — visible in the UI and logs.

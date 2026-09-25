@@ -11,6 +11,7 @@ dependencies = [
     "trafilatura>=1.12",
     "pyyaml>=6.0",
     "google-genai>=1.0",
+    "langfuse>=4.15,<5",
 ]
 
 [dependency-groups]

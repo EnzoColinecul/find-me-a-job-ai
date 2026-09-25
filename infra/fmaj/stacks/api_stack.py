@@ -117,6 +117,9 @@ class ApiStack(cdk.Stack):
                 # secret at first use (agent/providers.py), same as the pipeline.
                 "FMAJ_LLM_PROVIDER": config.llm_provider,
                 "FMAJ_GCP_SA_SECRET": f"fmaj/{config.stage}/gcp-sa-key",
+                # Langfuse Cloud keys, read at first trace (fmaj_agent.observability).
+                # Missing secret = tracing off, never a failed request.
+                "FMAJ_LANGFUSE_SECRET": f"fmaj/{config.stage}/langfuse",
             },
             log_retention=logs.RetentionDays.ONE_WEEK
             if config.stage == "test"
@@ -149,6 +152,10 @@ class ApiStack(cdk.Stack):
         # Gemini service-account key for /roles/interpret.
         sm.Secret.from_secret_name_v2(
             self, "GcpSaKey", f"fmaj/{config.stage}/gcp-sa-key"
+        ).grant_read(fn)
+        # Langfuse Cloud keys (JSON public_key/secret_key/base_url).
+        sm.Secret.from_secret_name_v2(
+            self, "LangfuseKeys", f"fmaj/{config.stage}/langfuse"
         ).grant_read(fn)
 
         # ── HTTP API (thin proxy; app owns auth + CORS) ───────────

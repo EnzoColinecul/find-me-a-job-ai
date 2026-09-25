@@ -15,7 +15,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from fmaj_agent import config
+from fmaj_agent import config, observability
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,9 @@ TOOLS = [
 
 
 class Provider:
+    #: Recorded on every generation so traces can be filtered by provider.
+    name = "unknown"
+
     def complete(
         self,
         system: str,
@@ -179,13 +182,67 @@ class Provider:
         force_tool: str | None = None,
         max_tokens: int = 1024,
         json_mode: bool = False,
+        purpose: str = "llm",
     ) -> Turn:
-        """json_mode: ask the provider to guarantee a JSON response where supported."""
+        """One model call, recorded as a Langfuse generation.
+
+        json_mode: ask the provider to guarantee a JSON response where supported.
+        purpose: what the call is for (triage, agent.turn, role_match…) — the
+        generation's name in the trace.
+
+        This is the ONE place generations are recorded, so every provider is
+        observed the same way and switching FMAJ_LLM_PROVIDER cannot lose the
+        trace. Only shapes and usage are recorded — never the prompt or the
+        completion text, which carry Places data and scraped page content.
+        """
+        params = {"max_tokens": max_tokens, "temperature": 0, "json_mode": json_mode,
+                  "use_tools": use_tools}
+        if force_tool:
+            params["force_tool"] = force_tool
+        with observability.observe(
+            purpose,
+            as_type="generation",
+            model=model,
+            model_parameters=params,
+            input={"messages": len(messages), "system_chars": len(system or ""),
+                   "roles": [m.get("role", "") for m in messages][-6:]},
+            metadata={"provider": self.name, "purpose": purpose},
+        ) as gen:
+            turn = self._complete(
+                system, messages, model=model, use_tools=use_tools, force_tool=force_tool,
+                max_tokens=max_tokens, json_mode=json_mode,
+            )
+            gen.update(
+                output={"tool_calls": [tu.name for tu in turn.tool_uses],
+                        "text_chars": len(turn.text or "")},
+                usage_details={"input": turn.input_tokens, "output": turn.output_tokens,
+                               "total": turn.input_tokens + turn.output_tokens},
+                cost_details=observability.cost_details(
+                    model, turn.input_tokens, turn.output_tokens),
+            )
+            if not turn.tool_uses and not (turn.text or "").strip():
+                gen.update(level="WARNING", status_message="empty response")
+            return turn
+
+    def _complete(
+        self,
+        system: str,
+        messages: list[dict],
+        *,
+        model: str,
+        use_tools: bool = True,
+        force_tool: str | None = None,
+        max_tokens: int = 1024,
+        json_mode: bool = False,
+    ) -> Turn:
+        """The provider's native call. Subclasses implement this, not `complete`."""
         raise NotImplementedError
 
 
 # ── Bedrock (Anthropic Claude) ────────────────────────────
 class BedrockProvider(Provider):
+    name = "bedrock"
+
     def __init__(self) -> None:
         import boto3
 
@@ -211,7 +268,7 @@ class BedrockProvider(Provider):
                 out.append({"role": "user", "content": content})
         return out
 
-    def complete(
+    def _complete(
         self, system, messages, *, model, use_tools=True, force_tool=None, max_tokens=1024, json_mode=False
     ) -> Turn:
         # Claude has no JSON mode flag; the prompt already demands JSON.
@@ -252,6 +309,8 @@ class BedrockProvider(Provider):
 
 # ── Gemini (Google, via Vertex AI) ────────────────────────
 class GeminiProvider(Provider):
+    name = "gemini"
+
     def __init__(self) -> None:
         import os
 
@@ -304,7 +363,7 @@ class GeminiProvider(Provider):
                 contents.append(types.Content(role="user", parts=parts))
         return contents
 
-    def complete(
+    def _complete(
         self, system, messages, *, model, use_tools=True, force_tool=None, max_tokens=1024, json_mode=False
     ) -> Turn:
         from google.genai import types
