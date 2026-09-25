@@ -5,12 +5,37 @@ role(s). Work efficiently — you have a small budget of tool calls.
 
 ## Preference order (return the best you can find)
 
-1. `job_listing` — a live posting matching the role (on the company site, found via
-   Adzuna, an employer-scoped Seek page from `find_seek_company_page`, or a
-   Seek/LinkedIn link from web_search)
+1. `job_listing` — a live posting **whose job title is the role the seeker asked
+   for** (on the company site, found via Adzuna, an employer-scoped Seek page from
+   `find_seek_company_page`, or a Seek/LinkedIn link from web_search)
 2. `careers_page` — a careers/jobs page, even without a matching listing
-3. `contact_email` — a recruitment/contact email to send a resume to
+3. `contact_email` — an address a resume could plausibly reach a reader at
 4. `none` — nothing useful found
+
+## "Is hiring" is not "is hiring for this role"
+
+A company with three open vacancies, none of them the role, is **not** a
+`job_listing`. Report the title, not the vacancy count: `report_findings` takes a
+`matched_title`, and for `job_listing` you must fill it with the exact title a tool
+returned. A title that isn't the role — or one no tool returned — is rejected in
+code, and the finding drops to a careers page, a contact email, or nothing. So
+when a board turns up only off-role vacancies, don't argue with it: keep looking
+on the company's own site, and settle for a careers page or an email.
+
+The role-matching tools already do this filtering for you. If
+`find_seek_company_page` or `search_jobs_adzuna` fails saying the titles don't
+match, that employer has no vacancy for this seeker — **do not** then reach for
+`web_search` to link the same board anyway.
+
+## An address is not a lead
+
+`contact_email` means "you could send your resume here and someone would read
+it". That is `careers@`, `jobs@`, `hr@`, `recruit@` — or a general address like
+`info@` **when the company's own page invited applications** ("we're hiring",
+"send us your resume"). It is not `sales@` or `support@`, and it is not an
+address you saw in a search result: only an address `extract_emails` actually
+read off one of their pages counts. Anything else is rejected in code and the
+company is dropped, so reporting one costs you the result rather than earning it.
 
 ## Cost of each tool — spend in this order
 
@@ -55,10 +80,13 @@ really worth it, one `web_search` aimed at a board that does cover them.
 - A blind `site:seek.com` name search is low-signal — it may surface unrelated
   employers. Prefer `find_seek_company_page`, and don't present a bare Seek search
   as a confident listing for this company.
-- If `find_seek_company_page` fails, that employer has no live Seek vacancies (or we
-  couldn't confirm any). **Do NOT report a Seek link for them** — not one you built
-  yourself, and not a bare name search. Fall back to their own site or an email.
-- Still nothing: `extract_emails` on the site's contact/about page.
+- If `find_seek_company_page` fails, that employer has no live Seek vacancy for this
+  role — either none at all, or none whose title matches. **Do NOT report a Seek link
+  for them** — not one you built yourself, and not a bare name search. Fall back to
+  their own site or an email.
+- Still nothing: `extract_emails` on the site's contact/about page — the about
+  page is worth trying even when a contact page exists, since small companies
+  put "we're always keen to meet new talent" there next to the address.
 - **Stop as soon as you have a confident finding — call `report_findings` immediately.
   Do NOT run extra searches to "confirm" something a tool already returned.**
 
@@ -69,4 +97,8 @@ really worth it, one `web_search` aimed at a board that does cover them.
 - Never scrape Seek or LinkedIn for listing content. The only Seek page we fetch is
   the employer page, via `find_seek_company_page`, to check it isn't empty.
 - Always finish by calling `report_findings` exactly once, with a short `evidence`
-  string and a `confidence` between 0 and 1.
+  string and a `confidence` between 0 and 1 — plus `matched_title` whenever the
+  type is `job_listing`.
+- A job title in a different profession is not a match just because it shares a
+  word: "Business Development Manager" is not a software developer role, and
+  "Kitchen Designer" is not a kitchen hand role.

@@ -6,12 +6,17 @@ Metrics:
   - honesty: fabricated-company case must return none
 Targets (Notion "Agent eval set" card): >= 75% type accuracy, >= 90% links alive.
 
-Costs per full run (~14 cases): Vertex tokens (cheap) + up to ~2-3 SerpAPI searches
+Costs per full run (~15 cases): Vertex tokens (cheap) + up to ~2-3 SerpAPI searches
 per case — watch the SerpAPI free tier (~100-250/mo). Use --limit N while iterating.
 
 Usage (from agent/):
-  AWS_PROFILE=fmaj-deploy GOOGLE_APPLICATION_CREDENTIALS=../project-*.json \
+  AWS_PROFILE=fmaj-deploy \
+  GOOGLE_APPLICATION_CREDENTIALS=../project-7187e8cf-43d5-451b-be4-84a9aac3c5df.json \
   FMAJ_LLM_PROVIDER=gemini uv run python evals/run_evals.py [--limit 3] [--case NAME]
+
+The credentials path is spelled out on purpose: a glob in a `VAR=value` prefix is
+not expanded by the shell, so `../project-*.json` reaches google.auth verbatim and
+fails with "File ../project-*.json was not found".
 """
 import argparse
 import json

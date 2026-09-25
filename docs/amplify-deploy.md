@@ -68,6 +68,7 @@ Amplify Console → **New app → Host web app** → GitHub →
   | `NEXT_PUBLIC_COGNITO_CLIENT_ID` | Auth stack `UserPoolClientId` (`19mi48bjem0sberbq0b4bas81n` for test) |
   | `NEXT_PUBLIC_COGNITO_DOMAIN` | `https://fmaj-test.auth.ap-southeast-2.amazoncognito.com` |
   | `NEXT_PUBLIC_GOOGLE_MAPS_KEY` | the browser Maps key (referrer-restricted) |
+  | `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID` | the cloud map ID carrying the POI-free map style |
 
 - Save and run the first build. Copy the branch URL, e.g.
   `https://main.d1abc2xyz.amplifyapp.com` — call it **`AMPLIFY_URL`**.

@@ -2,7 +2,9 @@
 
 Conduct rules (docs/PLAN.md §4): respect robots.txt, honest User-Agent, short
 timeouts, a few pages per site, never bypass logins/captchas. Seek/LinkedIn are
-never scraped — only linked to via web_search.
+never scraped for listing CONTENT — only linked to via web_search. The single
+exception is `find_seek_company_page`, which reads the vacancy *titles* off one
+robots-allowed employer page to check they match the role; see its docstring.
 """
 
 import re
@@ -11,6 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 import trafilatura
+from bs4 import BeautifulSoup
 
 from fmaj_agent import secrets
 from fmaj_agent.models import ToolResult
@@ -25,7 +28,47 @@ CAREERS_PATTERNS = re.compile(
     re.I,
 )
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-PREFERRED_EMAIL = re.compile(r"^(careers?|jobs?|hr|recruit\w*|people|work)@", re.I)
+
+#: Mailboxes somebody deliberately labelled for hiring. A resume sent here has a
+#: reader. These are reported on their own evidence.
+RECRUITMENT_EMAIL = re.compile(
+    r"^(careers?|jobs?|hr|recruit\w*|people|talent|work|employment|hiring|"
+    r"apply|applications?)@",
+    re.I,
+)
+PREFERRED_EMAIL = RECRUITMENT_EMAIL  # historical name, kept for callers/tests
+
+#: Mailboxes that are never a job application channel, whatever else the page
+#: says. Reporting `sales@` as a way into a company was the complaint that made
+#: this list exist: the address is real, and nobody there is reading resumes.
+NEVER_EMAIL = re.compile(
+    r"^(sales|support|help|helpdesk|billing|account|accounts|accounting|"
+    r"invoice|invoices|order|orders|noreply|no-reply|donotreply|do-not-reply|"
+    r"privacy|legal|abuse|postmaster|webmaster|marketing|press|media|security|"
+    r"unsubscribe|newsletter|spam)@",
+    re.I,
+)
+
+#: Everything else — `info@`, `contact@`, `hello@`, `admin@` — is often the ONLY
+#: address a cafe or a small trades business publishes, so it is not thrown away;
+#: it counts only when the company's own page actually invites applications. This
+#: pattern is that invitation, and the orchestrator gates generic mailboxes on it.
+#: Deliberately phrase-level rather than keyword-level: "careers" in a nav bar is
+#: not an invitation, "please send us your resume" is.
+HIRING_INVITATION = re.compile(
+    r"(send (?:us )?your (?:cv|resum|r\u00e9sum)"
+    r"|(?:we(?:\'re| are)|currently)\s+(?:hiring|recruiting)"
+    r"|now hiring"
+    r"|join (?:our|the) team"
+    r"|(?:current|open|available|latest)\s+(?:vacanc|position|role|opportunit)"
+    r"|positions? available"
+    r"|apply (?:now|online|today|here)"
+    r"|(?:job|career|employment) opportunit"
+    r"|keen to meet"
+    r"|expressions? of interest"
+    r"|register your interest)",
+    re.I,
+)
 
 _robot_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
 
@@ -78,7 +121,14 @@ def fetch_url(url: str) -> ToolResult:
         text = trafilatura.extract(resp.text) or ""
         return ToolResult(
             ok=True,
-            data={"url": str(resp.url), "text": text[:MAX_CHARS], "html_len": len(resp.text)},
+            data={
+                "url": str(resp.url),
+                "text": text[:MAX_CHARS],
+                "html_len": len(resp.text),
+                # Whether this page invites applications. It is what lets a
+                # generic `info@` count as a lead — see `extract_emails`.
+                "hiring_signal": bool(HIRING_INVITATION.search(text)),
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
@@ -212,6 +262,42 @@ _SEEK_SUFFIX_RE = re.compile(
 _SEEK_JOB_MARKER = re.compile(r'data-automation="jobTitle"')
 _SEEK_EMPTY_MARKER = re.compile(r"No matching search results", re.I)
 
+#: Titles per employer page we bother to read. Deciding "is any of these the
+#: role?" needs one hit, not the whole board.
+MAX_SEEK_TITLES = 25
+
+
+def _seek_job_titles(html: str) -> list[str]:
+    """Vacancy titles from a Seek employer page, in page order, deduped.
+
+    Parsed rather than regexed: the marker sits on an element whose text may be
+    nested (``<a data-automation="jobTitle"><span>…</span></a>``), and a regex
+    that assumed otherwise would silently return empty strings — which the role
+    gate would read as "couldn't judge" and refuse. Falls back to a regex only
+    if the parser itself blows up, and returns [] rather than raising.
+    """
+    titles: list[str] = []
+    seen: set[str] = set()
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        nodes = soup.select('[data-automation="jobTitle"]')
+        raw = [n.get_text(" ", strip=True) for n in nodes]
+    except Exception:  # noqa: BLE001 — a parser failure is not a vacancy count
+        raw = [
+            re.sub(r"<[^>]+>", " ", m)
+            for m in re.findall(
+                r'data-automation="jobTitle"[^>]*>(.{0,200}?)</', html, re.S
+            )
+        ]
+    for title in raw:
+        title = " ".join((title or "").split())[:120]
+        if title and title.lower() not in seen:
+            seen.add(title.lower())
+            titles.append(title)
+        if len(titles) >= MAX_SEEK_TITLES:
+            break
+    return titles
+
 
 def _seek_company_slug(company: str) -> str:
     """Slugify a company name into Seek's employer-page format.
@@ -245,11 +331,19 @@ def find_seek_company_page(company: str, country_code: str | None = None) -> Too
     HEAD-only version of this shipped links to empty pages. We therefore require
     POSITIVE evidence of at least one vacancy before returning a link.
 
-    Conduct: this counts job markers to decide whether to link, and keeps only the
-    count — no titles, descriptions or other listing content are extracted or
-    stored. ``/{slug}-jobs/at-this-company`` carries no ``/job/`` segment and no
+    Returns the vacancy **titles** as well as the count. Titles are what makes the
+    link checkable: "3 vacancies" was enough to send a *software developer* search
+    to Virtual IT Group, whose three openings were all something else. The caller
+    (`role_match.gate_seek`, bound in `orchestrator._dispatch_for`) decides whether
+    any of them is the role, and suppresses the link when none is.
+
+    Conduct: titles only — no descriptions, salaries, dates or other listing
+    content is read, and nothing here is persisted; the titles live only in the
+    tool result for the duration of the run, long enough to answer "is this the
+    job?". ``/{slug}-jobs/at-this-company`` carries no ``/job/`` segment and no
     query string, so Seek's robots.txt permits it for our user-agent; `_allowed`
-    re-checks that at call time and refuses if it ever changes.
+    re-checks that at call time and refuses if it ever changes. Reading a
+    listing's body, or fetching a ``/job/`` page, would still breach the rule.
     """
     country = (country_code or "").strip().lower()
     if country not in SEEK_COUNTRIES:
@@ -280,7 +374,12 @@ def find_seek_company_page(company: str, country_code: str | None = None) -> Too
         if jobs:
             return ToolResult(
                 ok=True,
-                data={"url": str(resp.url), "job_count": jobs, "company": company},
+                data={
+                    "url": str(resp.url),
+                    "job_count": jobs,
+                    "job_titles": _seek_job_titles(html),
+                    "company": company,
+                },
             )
         # Neither marker: Seek's markup probably changed. Fail CLOSED — surfacing a
         # link we can't vouch for is the bug this function exists to prevent — but
@@ -316,7 +415,21 @@ def web_search(query: str) -> ToolResult:
 
 
 def extract_emails(url: str) -> ToolResult:
-    """Scrape a contact/about page for emails, preferring careers@/jobs@/hr@."""
+    """Scrape a contact/about page for emails somebody might read a resume at.
+
+    Three tiers, because "the company has an email address" is not a job lead:
+
+    * `NEVER_EMAIL` mailboxes (`sales@`, `support@`, `billing@` …) are dropped
+      here so the model never has the option of reporting one.
+    * `RECRUITMENT_EMAIL` mailboxes (`careers@`, `hr@` …) stand on their own.
+    * everything else — `info@`, `contact@` — is returned but flagged
+      `recruitment: false`; `orchestrator._verify_email` only lets those through
+      when the page invited applications.
+
+    `hiring_signal` says whether THIS page carried that invitation, which is how
+    a cafe whose only address is `info@` still counts. It is read off the page we
+    already fetched, so it costs nothing extra.
+    """
     if not _allowed(url):
         return ToolResult(ok=False, reason="blocked by robots.txt")
     try:
@@ -326,7 +439,13 @@ def extract_emails(url: str) -> ToolResult:
         emails = sorted(set(EMAIL_RE.findall(resp.text)))
         # drop obvious asset false-positives
         emails = [e for e in emails if not e.lower().endswith((".png", ".jpg", ".webp"))]
-        emails.sort(key=lambda e: (not PREFERRED_EMAIL.match(e), e))
-        return ToolResult(ok=True, data={"emails": emails[:5]})
+        emails = [e for e in emails if not NEVER_EMAIL.match(e)]
+        emails.sort(key=lambda e: (not RECRUITMENT_EMAIL.match(e), e))
+        text = trafilatura.extract(resp.text) or resp.text
+        return ToolResult(ok=True, data={
+            "emails": emails[:5],
+            "recruitment": [e for e in emails[:5] if RECRUITMENT_EMAIL.match(e)],
+            "hiring_signal": bool(HIRING_INVITATION.search(text)),
+        })
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")

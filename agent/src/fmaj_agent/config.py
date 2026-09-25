@@ -1,4 +1,5 @@
 """Runtime config for the agent — stage-aware secret names, region, budgets."""
+
 import os
 
 STAGE = os.environ.get("FMAJ_STAGE", "test")
@@ -14,6 +15,18 @@ def _limit(name: str, default: int) -> int:
         return default
     return max(value, 0)
 
+
+def _ratio(name: str, default: float) -> float:
+    """A 0-1 threshold knob. Unlike `_limit`, 0 is NOT a magic 'off' switch —
+    a gate that exists to stop false positives must not be disabled by a typo,
+    so anything unparseable or out of range falls back to the default."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if 0.0 < value <= 1.0 else default
+
+
 PLACES_KEY_SECRET = f"fmaj/{STAGE}/places-key"
 ADZUNA_SECRET = f"fmaj/{STAGE}/adzuna"
 WEB_SEARCH_SECRET = f"fmaj/{STAGE}/web-search-key"  # SerpAPI
@@ -26,12 +39,8 @@ LLM_PROVIDER = os.environ.get("FMAJ_LLM_PROVIDER", "gemini")
 
 # Bedrock model IDs (AU cross-region inference profiles). Override via env if the
 # version suffix differs in your account (Bedrock console → Cross-region inference).
-AGENT_MODEL = os.environ.get(
-    "FMAJ_AGENT_MODEL", "au.anthropic.claude-haiku-4-5-20251001-v1:0"
-)
-TRIAGE_MODEL = os.environ.get(
-    "FMAJ_TRIAGE_MODEL", "au.anthropic.claude-haiku-4-5-20251001-v1:0"
-)
+AGENT_MODEL = os.environ.get("FMAJ_AGENT_MODEL", "au.anthropic.claude-haiku-4-5-20251001-v1:0")
+TRIAGE_MODEL = os.environ.get("FMAJ_TRIAGE_MODEL", "au.anthropic.claude-haiku-4-5-20251001-v1:0")
 # Sonnet available for escalation / higher-quality orchestration:
 #   FMAJ_AGENT_MODEL=au.anthropic.claude-sonnet-4-5-20250929-v1:0
 
@@ -70,14 +79,34 @@ VERTEX_LOCATION = os.environ.get("FMAJ_VERTEX_LOCATION", "global")
 #
 # **Set any of these to 0 for unlimited.** That is how production lifts the PoC
 # guard rails without touching code.
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ UNRESTRICTED-RUN — TEMPORARY. REVERT BEFORE MERGING TO main.           │
+# │                                                                        │
+# │ Both SerpAPI ceilings are off so one deployed search can be watched    │
+# │ working without a budget cutting it short. `MAX_SECONDS` is the only   │
+# │ wall left on a company, and it is deliberately under InvestigateFn's   │
+# │ Lambda timeout (300s) — past that the Lambda is killed before          │
+# │ `investigate_handler` writes its RESULT# row and the company hangs on  │
+# │ `pending` forever.                                                     │
+# │                                                                        │
+# │ `test_poc_defaults_stay_inside_the_serpapi_free_tier` FAILS while this │
+# │ block is in place. That is the point — it is the tripwire that stops   │
+# │ these values reaching prod. Do not skip or weaken it; revert instead:  │
+# │                                                                        │
+# │   git grep -n UNRESTRICTED-RUN                                         │
+# │                                                                        │
+# │ Restore: MAX_WEB_SEARCHES 2 · MAX_WEB_SEARCHES_PER_SEARCH 10 ·         │
+# │          MAX_TOOL_CALLS 8 · MAX_SECONDS 60 · InvestigateFn 150s        │
+# └────────────────────────────────────────────────────────────────────────┘
 MAX_COMPANIES = _limit("FMAJ_MAX_COMPANIES", 40)
-MAX_WEB_SEARCHES = _limit("FMAJ_MAX_WEB_SEARCHES", 2)
-MAX_WEB_SEARCHES_PER_SEARCH = _limit("FMAJ_MAX_WEB_SEARCHES_PER_SEARCH", 10)
-MAX_TOOL_CALLS = _limit("FMAJ_MAX_TOOL_CALLS", 8)
-MAX_SECONDS = _limit("FMAJ_MAX_SECONDS", 60)
+MAX_WEB_SEARCHES = _limit("FMAJ_MAX_WEB_SEARCHES", 0)  # was 2
+# was 10
+MAX_WEB_SEARCHES_PER_SEARCH = _limit("FMAJ_MAX_WEB_SEARCHES_PER_SEARCH", 0)
+MAX_TOOL_CALLS = _limit("FMAJ_MAX_TOOL_CALLS", 0)  # was 8
+MAX_SECONDS = _limit("FMAJ_MAX_SECONDS", 240)  # was 60
 
-#: Per-search ceilings for metered tools, keyed by tool name. Read at call time
-#: rather than captured, so tests and env overrides both work.
+ROLE_MATCH_THRESHOLD = _ratio("FMAJ_ROLE_MATCH_THRESHOLD", 0.8)
+
 _SHARED_CAPS = {"web_search": lambda: MAX_WEB_SEARCHES_PER_SEARCH}
 
 
@@ -90,19 +119,11 @@ def shared_cap(tool: str) -> int:
 def budget_summary() -> dict:
     """What the caps currently allow — logged per run so a surprising bill is
     traceable to the settings that produced it."""
-    arithmetic = (
-        MAX_COMPANIES * MAX_WEB_SEARCHES
-        if MAX_COMPANIES and MAX_WEB_SEARCHES
-        else 0
-    )
+    arithmetic = MAX_COMPANIES * MAX_WEB_SEARCHES if MAX_COMPANIES and MAX_WEB_SEARCHES else 0
     # The shared cap is the real ceiling when it is set; the arithmetic product
     # only bites if the counter is unreachable.
     if MAX_WEB_SEARCHES_PER_SEARCH:
-        effective = (
-            min(MAX_WEB_SEARCHES_PER_SEARCH, arithmetic)
-            if arithmetic
-            else MAX_WEB_SEARCHES_PER_SEARCH
-        )
+        effective = min(MAX_WEB_SEARCHES_PER_SEARCH, arithmetic) if arithmetic else MAX_WEB_SEARCHES_PER_SEARCH
     else:
         effective = arithmetic
     return {

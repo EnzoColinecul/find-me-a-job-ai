@@ -54,12 +54,23 @@ def main() -> None:
     rows = []
     for suburb, (lat, lng) in suburbs.items():
         for role in roles:
+            # One client is shared across combos so the run's total is honest,
+            # but that makes `result.stats` call counts CUMULATIVE — a later
+            # combo appears to have made every earlier combo's calls too. Report
+            # the delta, so "did this role need Nearby or Text?" is answerable
+            # from the line. (In production there is one client per search, so
+            # `discovery`'s own stats are already per-search.)
+            before = client.stats.as_dict()
             result = discover(
                 lat, lng, args.radius, [role],
                 client=client, max_companies=args.max,
                 fetch_details=not args.no_details,
             )
-            print(f"{suburb} x {role}: {result.stats}")
+            stats = {
+                **result.stats,
+                **{k: v - before[k] for k, v in client.stats.as_dict().items()},
+            }
+            print(f"{suburb} x {role}: {stats}")
             for c in result.companies:
                 rows.append({
                     "suburb": suburb,
@@ -67,6 +78,11 @@ def main() -> None:
                     "company": c.name,
                     "address": c.address,
                     "types": "|".join(c.types),
+                    # Which call earned this row. Grade per source: a type that
+                    # fills the shortlist with the wrong industry is worse than
+                    # useless, because distance ranking lets it push the text
+                    # queries' results out of the cut entirely.
+                    "source": c.discovery_source,
                     "website": c.website or "",
                     "relevant?": "",  # manual grading column
                 })

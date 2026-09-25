@@ -89,7 +89,9 @@ TOOLS = [
             "~19 countries; the right one is chosen automatically from the "
             "company's address, so you do not pass a country. If the "
             "company's country isn't covered it fails with a reason — that "
-            "is normal outside those markets, so move on rather than retry."
+            "is normal outside those markets, so move on rather than retry. "
+            "Results are filtered to postings whose title matches the role; if "
+            "every hit was something else it fails and names them."
         ),
         "parameters": {
             "type": "object",
@@ -104,9 +106,12 @@ TOOLS = [
             "(au.seek.com/<company>-jobs/at-this-company). Prefer this over a "
             "blind site:seek.com web_search, which matches the name as a "
             "search term and returns other employers' jobs. Returns a URL "
-            "ONLY if the page has at least one live vacancy, plus job_count; "
-            "otherwise it fails and you should not link to Seek. For a company "
-            "outside Australia it always fails — don't call it."
+            "ONLY if the employer has a live vacancy whose title MATCHES the "
+            "role sought, plus `matching_titles`; if the employer is hiring for "
+            "something else it fails and names the titles it rejected — that is "
+            "not a listing, so move on and look for a careers page or a contact "
+            "email instead. For a company outside Australia it always fails — "
+            "don't call it."
         ),
         "parameters": {"type": "object", "properties": {"company": {"type": "string"}}, "required": ["company"]},
     },
@@ -117,7 +122,9 @@ TOOLS = [
             "company's country. site:linkedin.com/jobs works anywhere. In "
             "Australia try find_seek_company_page first, and treat a "
             "site:seek.com name search as a weak last resort. Returns links "
-            "only."
+            "only — a result title is a page title, not a vacancy title, so a "
+            "link from here is a job_listing only if you can name the actual "
+            "role it advertises."
         ),
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
@@ -128,7 +135,13 @@ TOOLS = [
     },
     {
         "name": "report_findings",
-        "description": "Report the final result. Call exactly once when done.",
+        "description": (
+            "Report the final result. Call exactly once when done. For "
+            "opportunity_type=job_listing you MUST set matched_title to the "
+            "exact vacancy title a tool returned; a listing whose title isn't "
+            "the role sought is downgraded to a careers page, contact email, or "
+            "dropped."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -140,6 +153,14 @@ TOOLS = [
                 "emails": {"type": "array", "items": {"type": "string"}},
                 "evidence": {"type": "string"},
                 "confidence": {"type": "number"},
+                "matched_title": {
+                    "type": "string",
+                    "description": (
+                        "Required for job_listing: the exact job title of the "
+                        "matching vacancy, copied verbatim from a tool result. "
+                        "Never invent one."
+                    ),
+                },
             },
             "required": ["opportunity_type", "evidence", "confidence"],
         },

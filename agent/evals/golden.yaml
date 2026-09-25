@@ -99,3 +99,20 @@ cases:
     roles: [barista]
     accept: [none]
     note: Fabricated company — the agent must NOT invent links/emails.
+
+  # ── Role matching (regression, 2026-09-03) ──
+  # Reported live: a Melbourne "software developer" search returned this company
+  # with a Seek link to vacancies that were nothing of the sort. The employer
+  # really is hiring, so `job_listing` is the WRONG answer and is deliberately
+  # absent from `accept` — the point of the case is that being
+  # hired-for-something-else does not count as a match.
+  #
+  # Their live Seek vacancies drift, so re-check before blaming the agent:
+  # 2026-09-03 -> 1 vacancy, "Product Manager" (was 3 in August). If they ever
+  # post an actual developer role this case flips and should be re-labelled.
+  - name: Virtual IT Group
+    website: https://virtualitgroup.com.au
+    types: []
+    roles: [software developer]
+    accept: [careers_page, contact_email, none]
+    note: Role-match gate — vacancies exist but none is a developer role.

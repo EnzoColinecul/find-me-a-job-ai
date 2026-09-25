@@ -2,9 +2,25 @@
 # discovery harness reveals gaps (Notion card: "Role → Places-type mapping").
 #
 # Each role has:
-#   types:      Places (New) Table A types for Nearby Search (empty = skip nearby)
-#   text_query: optional Text Search query used IN ADDITION when types are weak
+#   types:       Places (New) Table A types for Nearby Search (empty = skip nearby)
+#   text_query:  optional Text Search query used IN ADDITION when types are weak
+#   text_queries: several of those, for roles one phrase can't describe
 # Unknown roles fall back to Text Search with the role itself as the query.
+#
+# TYPES ARE THE STRONG SIGNAL, AND OFFICE ROLES DON'T HAVE ONE. Google has a
+# venue type for a cafe and none for a software company, so hospitality, retail
+# and trades roles get precise Nearby results while office roles fall back to
+# Text Search — which matches a *description*, so the candidate pool is only as
+# good as the phrases below. `it support`'s single "IT services company" is why a
+# Melbourne "software developer" search returned nothing but managed service
+# providers: the query was asking for MSPs, and Google obliged.
+#
+# Two consequences worth remembering before tuning anything downstream:
+#   * a bad text_query cannot be rescued by more pages or a better match gate —
+#     the right companies were never in the pool;
+#   * every type string must exist in Places (New) Table A, or the Nearby call
+#     fails with 400 INVALID_ARGUMENT. Verify with scripts/discovery_harness.py
+#     before trusting a new entry.
 
 chef:
   types: [restaurant, cafe, bakery, bar, meal_takeaway]
@@ -37,6 +53,23 @@ hairdresser / barber:
 aged care worker:
   types: []
   text_query: aged care facility
+# ── Office roles (added 2026-09-03) ──
+# NO `types`, and that is the finding, not an omission. `corporate_office` and
+# `consultant` were tried and graded against Melbourne CBD: they took 39 of the
+# 40 shortlist places — migration agents, naturopaths, accountants, and a pile of
+# virtual-office registrations sharing one Bourke St address — and left exactly
+# ONE text-search result standing. They did not merely add noise: Nearby returns
+# the 20 NEAREST of each type, all within metres of a CBD pin, so distance
+# ranking pushed every genuine software company below the cut. A broad type next
+# to text queries is worse than no type at all.
+software developer:
+  types: []
+  text_queries:
+    - software development company
+    - web development agency
+    - software company
 it support:
   types: []
-  text_query: IT services company
+  text_queries:
+    - IT services company
+    - managed IT services provider

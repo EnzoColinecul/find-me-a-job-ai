@@ -55,6 +55,10 @@ coverage/
 # discovery harness output
 agent/discovery_results.csv
 *_results.csv
+# Harness output carries Places-derived company names — graded by hand,
+# never committed (Places ToS: don't persist place data beyond the search).
+*-discovery.csv
+discovery*.csv
 
 # eval outputs
 agent/evals/results-*.json

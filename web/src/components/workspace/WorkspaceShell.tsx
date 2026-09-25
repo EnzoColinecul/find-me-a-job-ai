@@ -17,6 +17,21 @@ import Rail from "./Rail";
 const MAPS_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY!;
 
 /**
+ * A *cloud* map ID (Google Maps Platform → Map Management), associated with the
+ * map style that hides POI icons — restaurants, museums, supermarkets and the
+ * rest of Google's own pins, which competed with our numbered result pins.
+ *
+ * Two things follow from setting it, and neither is optional:
+ *  - the map becomes cloud-styled, so a hardcoded `styles` prop would be
+ *    ignored. **All base-map appearance changes are made in the console**, not
+ *    here. Editing the style there re-renders this map with no deploy.
+ *  - `AdvancedMarker` requires a valid map ID. The old literal `"fmaj-search"`
+ *    was never registered with Google, so we were running on the default look
+ *    and an unrecognised ID.
+ */
+const MAP_ID = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID!;
+
+/**
  * A stand-in map size for the very first frame, before the real element has
  * been measured. `FitToRadius` re-frames as soon as the map exists, and the
  * camera then reports its own scale, so this only has to be plausible.
@@ -244,7 +259,7 @@ export default function WorkspaceShell({
                1 km search at metro scale. */
             defaultZoom={zoomForRadius(radiusKm, NOMINAL_MAP_PX, center.lat)}
             center={center}
-            mapId="fmaj-search"
+            mapId={MAP_ID}
             className="h-full w-full"
             onClick={(e) =>
               e.detail.latLng && onCenterChange?.(e.detail.latLng)

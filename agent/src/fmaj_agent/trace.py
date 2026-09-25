@@ -33,6 +33,9 @@ TOOL_LABELS: dict[str, str] = {
     "find_careers_link": "extract_jobs",
     "search_jobs_adzuna": "extract_jobs",
     "find_seek_company_page": "seek.company",
+    # A real LLM call: `role_match` judges vacancy titles against the role, and
+    # this row is emitted when it rejects what the agent tried to report.
+    "role_match": "match_role",
     "web_search": "web_search",
     "extract_emails": "extract_contact",
     "report_findings": "report",
@@ -106,14 +109,30 @@ def summarise_tool_result(name: str, args: dict, result) -> tuple[Tag, str]:
         return (Tag.FOUND if n else Tag.CHECKING), f'"{query}"'
     if name == "find_seek_company_page":
         n = data.get("job_count") or 0
-        return (Tag.FOUND, f"{n} Seek vacanc{'y' if n == 1 else 'ies'}") if n else (
+        # `matching_count` is set once the role gate has run. Saying "3 Seek
+        # vacancies" for a page whose 3 vacancies are all the wrong job is the
+        # over-reporting this panel exists to avoid, so name the matches.
+        matching = data.get("matching_count")
+        if matching:
+            return Tag.FOUND, f"{matching} of {n} match the role"
+        return (Tag.CHECKING, f"{n} vacanc{'y' if n == 1 else 'ies'}, unchecked") if n else (
             Tag.CHECKING, "no listings",
         )
     if name == "extract_emails":
-        n = len(data.get("emails") or [])
-        return (Tag.FOUND, f"{n} email{'s' if n != 1 else ''}") if n else (
-            Tag.CHECKING, "no address",
-        )
+        emails = data.get("emails") or []
+        n = len(emails)
+        if not n:
+            return Tag.CHECKING, "no address"
+        # An address is only a find if a resume could plausibly reach a reader:
+        # a mailbox labelled for hiring, or a page that invited applications.
+        # "1 email" for a `sales@` scraped off a dead site read as success and
+        # was not — see `orchestrator._verify_email`.
+        recruitment = len(data.get("recruitment") or [])
+        if recruitment:
+            return Tag.FOUND, f"{recruitment} recruitment email{'s' if recruitment != 1 else ''}"
+        if data.get("hiring_signal"):
+            return Tag.FOUND, f"{n} email{'s' if n != 1 else ''}, page invites applications"
+        return Tag.CHECKING, f"{n} email{'s' if n != 1 else ''}, no hiring signal"
     if name == "find_careers_link":
         url = data.get("url") or ""
         return (Tag.FOUND, "careers page") if url else (Tag.CHECKING, "none found")
