@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 
+from fmaj_agent import observability
 from fmaj_agent.models import Company
 from fmaj_agent.orchestrator import investigate
 
@@ -47,6 +48,10 @@ def main() -> None:
     print("\n=== TRACE ===")
     for step in run.trace:
         print(" •", step)
+    # A short-lived process: hand the spans over before exiting.
+    observability.flush(timeout=10)
+    if observability.enabled():
+        print('\nLangfuse: trace "company.local" (filter by metadata place_id=local-test)')
 
 
 if __name__ == "__main__":
