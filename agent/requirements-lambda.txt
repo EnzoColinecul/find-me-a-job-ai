@@ -9,3 +9,5 @@ beautifulsoup4>=4.12
 trafilatura>=1.12
 pyyaml>=6.0
 google-genai>=1.0
+# Tracing. Pinned to the 4.x API (propagate_attributes / start_as_current_observation).
+langfuse>=4.15,<5

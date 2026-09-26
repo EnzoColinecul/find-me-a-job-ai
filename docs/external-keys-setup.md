@@ -1,12 +1,13 @@
 # External API keys
 
-Three external services, one Secrets Manager entry each, per stage:
+Four external services, one Secrets Manager entry each, per stage:
 
 | Secret name | Contents | Used by |
 |---|---|---|
 | `fmaj/{stage}/places-key` | Google Places API key (string) | Discovery Lambda |
 | `fmaj/{stage}/adzuna` | `{"app_id": "...", "app_key": "..."}` | `search_jobs_adzuna` tool |
 | `fmaj/{stage}/web-search-key` | SerpAPI key (string) | `web_search` tool |
+| `fmaj/{stage}/langfuse` | `{"public_key": "pk-lf-…", "secret_key": "sk-lf-…", "base_url": "https://cloud.langfuse.com"}` | Tracing, API + every pipeline Lambda — see [observability.md](observability.md) |
 
 ## Register (run once per stage)
 

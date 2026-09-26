@@ -16,3 +16,14 @@ def _isolate_settings(monkeypatch):
     monkeypatch.setattr(settings, "cognito_user_pool_id", "ap-southeast-2_test",
                         raising=False)
     monkeypatch.setattr(settings, "cognito_client_id", "test-client", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _tracing_off():
+    """Never export spans to Langfuse Cloud from a test run (the repo-root .env
+    holds real keys). Tests that check tracing install their own client."""
+    from fmaj_agent import observability
+
+    observability.disable()
+    yield
+    observability.disable()

@@ -43,3 +43,16 @@ def test_stages_synth() -> None:
     ]
     flat = [a for act in actions for a in (act if isinstance(act, list) else [act])]
     assert "states:StopExecution" in flat and "states:StartExecution" in flat
+    assert env["FMAJ_LANGFUSE_SECRET"] == "fmaj/test/langfuse"
+
+    # Langfuse: every pipeline Lambda knows where its keys are and may read them,
+    # and no key value is ever baked into a template.
+    pipeline_fns = [r for r in pipeline.values() if r["Type"] == "AWS::Lambda::Function"
+                    and "fmaj_agent.handlers" in str(r["Properties"].get("Handler", ""))]
+    assert len(pipeline_fns) == 4
+    for fn in pipeline_fns:
+        assert fn["Properties"]["Environment"]["Variables"]["FMAJ_LANGFUSE_SECRET"] == (
+            "fmaj/test/langfuse")
+    templates = str(pipeline) + str(api)
+    assert "fmaj/test/langfuse" in templates
+    assert "sk-lf-" not in templates and "LANGFUSE_SECRET_KEY" not in templates

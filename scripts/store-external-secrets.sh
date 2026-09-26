@@ -45,6 +45,12 @@ read -rs -p "Google Places SERVER key: " PLACES; echo
 read -rs -p "Adzuna app_id: "           ADZ_ID; echo
 read -rs -p "Adzuna app_key: "          ADZ_KEY; echo
 read -rs -p "SerpAPI key: "             SERP;   echo
+echo
+echo "Langfuse Cloud (Settings -> API Keys). Base URL: EU https://cloud.langfuse.com,"
+echo "US https://us.cloud.langfuse.com. All three are needed to rewrite the secret."
+read -rs -p "Langfuse public key (pk-lf-...): " LF_PK; echo
+read -rs -p "Langfuse secret key (sk-lf-...): " LF_SK; echo
+read -r  -p "Langfuse base URL [https://cloud.langfuse.com]: " LF_URL
 
 put_secret "fmaj/$STAGE/places-key"     "$PLACES"
 # Adzuna is one JSON secret, so both halves are needed to rewrite it.
@@ -57,6 +63,16 @@ else
   echo "skipped  fmaj/$STAGE/adzuna (left blank — existing value kept)"
 fi
 put_secret "fmaj/$STAGE/web-search-key" "$SERP"
+# Langfuse is one JSON secret: rewrite only when both keys were given.
+if [ -n "$LF_PK" ] && [ -n "$LF_SK" ]; then
+  put_secret "fmaj/$STAGE/langfuse" \
+    "$(printf '{"public_key":"%s","secret_key":"%s","base_url":"%s"}' \
+        "$LF_PK" "$LF_SK" "${LF_URL:-https://cloud.langfuse.com}")"
+elif [ -n "$LF_PK" ] || [ -n "$LF_SK" ]; then
+  echo "skipped  fmaj/$STAGE/langfuse (needs BOTH public and secret key — one was blank)"
+else
+  echo "skipped  fmaj/$STAGE/langfuse (left blank — existing value kept)"
+fi
 
 echo
 echo "Done. Verify:  aws secretsmanager list-secrets --profile $PROFILE --region $REGION \\

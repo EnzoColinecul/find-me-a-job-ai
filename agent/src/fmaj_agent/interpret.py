@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from fmaj_agent import config, mapping
+from fmaj_agent import config, mapping, observability
 from fmaj_agent.models import RoleSuggestion
 from fmaj_agent.providers import get_provider
 
@@ -92,7 +92,26 @@ def _parse_json(raw: str | None) -> dict | None:
 
 
 def interpret_roles(text: str) -> Interpretation:
-    """Free text -> ordered role suggestions. Never raises."""
+    """Free text -> ordered role suggestions. Never raises.
+
+    Traced as its own short trace (no search exists yet). The user's own words
+    are NOT sent to Langfuse — only their length and what came back.
+    """
+    with observability.observe(
+        "roles.interpret", new_trace=True, trace_name="roles.interpret",
+        trace_meta={"provider": config.LLM_PROVIDER},
+        tags=[f"stage:{config.STAGE}", f"provider:{config.LLM_PROVIDER}"],
+        input={"text_chars": len(text or "")},
+    ) as obs:
+        result = _interpret_roles(text)
+        obs.update(output={"ok": result.ok,
+                           "roles": [r.label for r in result.roles]})
+        if not result.ok:
+            obs.update(level="WARNING", status_message=result.message)
+        return result
+
+
+def _interpret_roles(text: str) -> Interpretation:
     text = (text or "").strip()
     if not text:
         return Interpretation(roles=[], ok=False, message=VAGUE_MESSAGE)
@@ -108,7 +127,7 @@ def interpret_roles(text: str) -> Interpretation:
             model=model, use_tools=False,
             # Gemini 3 spends part of the budget on thinking tokens — too small a
             # limit returns empty text and nothing to parse.
-            max_tokens=2048, json_mode=True,
+            max_tokens=2048, json_mode=True, purpose="roles.interpret",
         )
         data = _parse_json(turn.text)
         if data is None:

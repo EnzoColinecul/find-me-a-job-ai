@@ -144,6 +144,19 @@ Pluggable via `FMAJ_LLM_PROVIDER` = `bedrock` | `gemini` (`agent/src/fmaj_agent/
   `/job/` segment and no query string, so Seek's robots.txt allows it for our UA
   (`*/job/`, `*?`, `/graphql`, `/api/jobsearch/` are the disallowed ones). Reading
   a listing's body, or fetching one, would still breach the rule.
+- **Langfuse Cloud tracing (2026-09-25) — `observability.py`, runbook
+  `docs/observability.md`.** This is separate from `trace.py`: that one is the
+  user's panel, this one is ours. One trace per search, with its id derived from
+  `search_id` (`trace_id_for`), so the API and each Lambda join it without
+  sharing state. Generations are recorded ONLY in `providers.Provider.complete`.
+  Subclasses implement `_complete`, which keeps Gemini and Bedrock observed
+  identically. Two rules: **it never fails a search** (every call swallows its
+  own errors, flush is bounded), and **it never sends content**: no prompts,
+  completions, page text, company name, address or website (Places ToS;
+  `place_id` only), nothing about the applicant, and no keys. Tests plant each of
+  these and assert none leaves. Keys: repo-root `.env` locally (only the
+  `LANGFUSE_*` names are read from it), `fmaj/{stage}/langfuse` in Secrets
+  Manager when deployed. Test suites force tracing off in `conftest.py`.
 - **Trace (`trace.py`) feeds the "nothing hidden" panel, so it must not lie.**
   `TOOL_LABELS` is the one place internal names become display names, and every
   label must name a call we really make (the mockup's `places.details` row is

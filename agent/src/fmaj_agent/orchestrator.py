@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fmaj_agent import config, role_match
+from fmaj_agent import config, observability, role_match
 from fmaj_agent.budget import NoSharedBudget, SearchBudget
 from fmaj_agent.models import Company, Findings, OpportunityType
 from fmaj_agent.providers import get_provider
@@ -70,6 +70,11 @@ def _dispatch_for(company: Company) -> dict:
     }
 
 
+def _run_tool(dispatch: dict, name: str, args: dict):
+    """Run one tool, or None for a tool we don't have. Tools never raise."""
+    return dispatch[name](args) if name in dispatch else None
+
+
 @dataclass
 class AgentRun:
     findings: Findings
@@ -97,6 +102,9 @@ class AgentRun:
     #: True once any fetched page invited applications ("send us your resume",
     #: "we're hiring"). It is what lets a generic `info@` count as a lead.
     saw_hiring_signal: bool = False
+    #: True when the run ended in `_force_report` (tool-call or time budget hit).
+    #: Observability only — not part of `stats()`, whose shape is persisted.
+    forced_report: bool = False
 
     def stats(self) -> dict:
         return {
@@ -301,7 +309,7 @@ def _triage(company: Company, run: AgentRun) -> bool:
     )
     turn = get_provider().complete(
         "", [{"role": "user", "text": prompt}],
-        model=_triage_model(), use_tools=False, max_tokens=50,
+        model=_triage_model(), use_tools=False, max_tokens=50, purpose="triage",
     )
     run.input_tokens += turn.input_tokens
     run.output_tokens += turn.output_tokens
@@ -331,6 +339,7 @@ def investigate(
     company: Company,
     on_step: StepSink = noop_sink,
     budget: SearchBudget | None = None,
+    search_id: str | None = None,
 ) -> AgentRun:
     """Run the full investigation for one company. Never raises.
 
@@ -341,7 +350,80 @@ def investigate(
     `budget` meters paid tools across every company in the same search. Defaults
     to no shared ceiling, which is right for a local run: there is only one
     company in flight, so the per-company cap already is the per-search cap.
+
+    `search_id` puts this run inside that search's Langfuse trace; without it
+    (a local single-company run) the run gets a trace of its own.
     """
+    with observability.sensitive(
+        company.name, company.address, observability.host_of(company.website)
+    ), observability.observe(
+        "company",
+        as_type="agent",
+        search_id=search_id,
+        new_trace=not search_id,
+        trace_name="search" if search_id else "company.local",
+        trace_meta=_trace_meta(company, search_id),
+        tags=_trace_tags(company),
+        metadata={"place_id": company.place_id, "country_code": company.country_code,
+                  "roles": company.roles, "provider": config.LLM_PROVIDER,
+                  "model": _model(), "has_website": bool(company.website)},
+    ) as obs:
+        run = _investigate(company, on_step, budget, obs)
+        _record_outcome(obs, run)
+        return run
+
+
+def _trace_meta(company: Company, search_id: str | None) -> dict:
+    """Trace-level filters. Ids, codes and role labels only — no company name
+    or address (Places data), nothing about the applicant."""
+    return {
+        "search_id": search_id,
+        "place_id": None if search_id else company.place_id,
+        "country_code": company.country_code,
+        "role": ", ".join(company.roles)[:200],
+        "provider": config.LLM_PROVIDER,
+        "model": _model(),
+    }
+
+
+def _trace_tags(company: Company) -> list[str]:
+    tags = [f"stage:{config.STAGE}", f"provider:{config.LLM_PROVIDER}"]
+    if company.country_code:
+        tags.append(f"country:{company.country_code}")
+    tags += [f"role:{r}" for r in company.roles[:3]]
+    return tags
+
+
+def _record_outcome(obs, run: AgentRun) -> None:
+    """Final status of one company, on its `company` observation."""
+    f = run.findings
+    obs.update(
+        output={
+            "opportunity_type": f.opportunity_type.value,
+            "confidence": f.confidence,
+            "links": len(f.links),
+            "emails": len(f.emails),
+            "forced_report": run.forced_report,
+            "error": run.error or None,
+        },
+        metadata={
+            "tool_calls": run.tool_calls,
+            "web_searches": run.metered_calls.get("web_search", 0),
+            "input_tokens": run.input_tokens,
+            "output_tokens": run.output_tokens,
+            "seconds": round(run.seconds, 2),
+            "forced_report": run.forced_report,
+            "outcome": "error" if run.error else f.opportunity_type.value,
+        },
+    )
+    if run.error:
+        obs.error(run.error)
+    elif run.forced_report:
+        obs.update(level="WARNING", status_message="budget reached; report was forced")
+
+
+def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | None,
+                 obs) -> AgentRun:
     budget = budget or NoSharedBudget()
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
     dispatch = _dispatch_for(company)
@@ -355,6 +437,7 @@ def investigate(
         provider = get_provider()
         if not _triage(company, run):
             emit(Tag.SKIPPING, "triage", "not a likely employer")
+            obs.event("triage.rejected")
             run.findings = Findings(
                 opportunity_type=OpportunityType.NONE,
                 evidence="triage: not a plausible employer for the role",
@@ -384,7 +467,8 @@ def investigate(
         max_seconds = config.MAX_SECONDS or float("inf")
 
         while run.tool_calls < max_calls and (time.monotonic() - start) < max_seconds:
-            turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024)
+            turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024,
+                                     purpose="agent.turn")
             run.input_tokens += turn.input_tokens
             run.output_tokens += turn.output_tokens
             messages.append({"role": "assistant", "text": turn.text,
@@ -407,6 +491,8 @@ def investigate(
                         # The panel promises nothing hidden, so a rejected claim
                         # is a visible row, not a silent rewrite.
                         emit(Tag.SKIPPING, "role_match", downgraded[:60])
+                        obs.event("report.downgraded", level="WARNING",
+                                  status_message=downgraded)
                     emit(
                         Tag.FOUND
                         if run.findings.opportunity_type is not OpportunityType.NONE
@@ -424,27 +510,43 @@ def investigate(
                     # told why, so it can fall back to a cheaper source, and the
                     # trace shows the refusal instead of a phantom step.
                     emit(Tag.SKIPPING, tu.name, denial)
+                    obs.event("budget.denied", level="WARNING",
+                              metadata={"tool": tu.name}, status_message=denial)
                     results.append({"id": tu.id, "name": tu.name,
                                     "output": {"ok": False, "reason": denial}})
                     continue
 
-                result = dispatch[tu.name](tu.input) if tu.name in dispatch else None
-                # Record what the model is about to see BEFORE gating, so the
-                # report gate can tell "you never saw that title" apart from
-                # "you saw it and it wasn't the role".
-                for title in role_match.observed_titles(tu.name, result):
-                    run.observed_titles.setdefault(title.lower(), title)
-                if result is not None and result.ok:
-                    if result.data.get("hiring_signal"):
-                        run.saw_hiring_signal = True
-                    if tu.name == "extract_emails":
-                        for email in result.data.get("emails") or []:
-                            run.observed_emails.setdefault(str(email).lower(), email)
-                gate = role_match.GATES.get(tu.name)
-                if gate is not None and result is not None and company.roles:
-                    result, report = gate(result, company.roles)
-                    if report is not None:
-                        run.verified_titles |= {t.lower() for t in report.titles}
+                with observability.observe(
+                    f"tool.{tu.name}", as_type="tool",
+                    input=observability.tool_input_summary(tu.input),
+                    metadata={"tool": tu.name},
+                ) as tool_obs:
+                    result = _run_tool(dispatch, tu.name, tu.input)
+                    # Record what the model is about to see BEFORE gating, so the
+                    # report gate can tell "you never saw that title" apart from
+                    # "you saw it and it wasn't the role".
+                    for title in role_match.observed_titles(tu.name, result):
+                        run.observed_titles.setdefault(title.lower(), title)
+                    if result is not None and result.ok:
+                        if result.data.get("hiring_signal"):
+                            run.saw_hiring_signal = True
+                        if tu.name == "extract_emails":
+                            for email in result.data.get("emails") or []:
+                                run.observed_emails.setdefault(str(email).lower(), email)
+                    gate = role_match.GATES.get(tu.name)
+                    if gate is not None and result is not None and company.roles:
+                        gated_ok = result.ok
+                        result, report = gate(result, company.roles)
+                        if report is not None:
+                            run.verified_titles |= {t.lower() for t in report.titles}
+                        if gated_ok and not result.ok:
+                            tool_obs.event("role_match.rejected", level="WARNING")
+                    tool_obs.update(output=observability.tool_output_summary(result))
+                    if result is None or not result.ok:
+                        tool_obs.update(
+                            level="WARNING",
+                            status_message=(result.reason if result else "unknown tool") or "failed",
+                        )
                 output = result.model_dump() if result else {"ok": False, "reason": "unknown"}
                 tag, meta = summarise_tool_result(tu.name, tu.input, result)
                 emit(tag, tu.name, meta)
@@ -454,11 +556,21 @@ def investigate(
                 run.seconds = time.monotonic() - start
                 return run
 
+        run.forced_report = True
+        obs.event(
+            "budget.breach", level="WARNING",
+            metadata={"tool_calls": run.tool_calls,
+                      "seconds": round(time.monotonic() - start, 1),
+                      "max_tool_calls": config.MAX_TOOL_CALLS,
+                      "max_seconds": config.MAX_SECONDS},
+            status_message="tool-call or time budget reached; forcing report_findings",
+        )
         run.findings, downgraded = _verify(
             _force_report(provider, messages, run), run, company.roles
         )
         if downgraded:
             emit(Tag.SKIPPING, "role_match", downgraded[:60])
+            obs.event("report.downgraded", level="WARNING", status_message=downgraded)
     except Exception as exc:  # noqa: BLE001 — one company's failure must not crash the batch
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
@@ -478,13 +590,16 @@ def _force_report(provider, messages: list[dict], run: AgentRun) -> Findings:
         "Budget reached. Call report_findings now with what you found so far."})
     try:
         turn = provider.complete(_SYSTEM, messages, model=_model(),
-                                 force_tool="report_findings", max_tokens=512)
+                                 force_tool="report_findings", max_tokens=512,
+                                 purpose="forced_report")
         run.input_tokens += turn.input_tokens
         run.output_tokens += turn.output_tokens
         for tu in turn.tool_uses:
             if tu.name == "report_findings":
                 return _findings_from_report(tu.input)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning("forced report failed")
+        observability.current_event("forced_report.failed", level="ERROR",
+                                    status_message=type(exc).__name__)
     return Findings(opportunity_type=OpportunityType.NONE,
                     evidence="budget exhausted, no finding", confidence=0.0)

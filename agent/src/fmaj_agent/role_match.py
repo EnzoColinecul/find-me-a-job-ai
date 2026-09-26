@@ -179,7 +179,7 @@ def _judge(titles: list[str], roles: list[str]) -> list[TitleVerdict] | None:
             model=model, use_tools=False,
             # Gemini 3 spends part of the budget on thinking tokens; too tight a
             # limit returns empty text and nothing to parse (see interpret.py).
-            max_tokens=2048, json_mode=True,
+            max_tokens=2048, json_mode=True, purpose="role_match",
         )
     except Exception:  # noqa: BLE001 — a flaky judge must not fail the company
         logger.warning("role match judge failed for %s", roles, exc_info=True)

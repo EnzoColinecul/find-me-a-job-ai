@@ -95,9 +95,13 @@ def interpret(req: InterpretRequest, user: AuthUser = Depends(require_user)) -> 
 
     Does NOT consume the free-search quota — users can rephrase as often as they like.
     """
+    from fmaj_agent import observability
     from fmaj_agent.interpret import interpret_roles
 
-    result = interpret_roles(req.text)
+    try:
+        result = interpret_roles(req.text)
+    finally:
+        observability.flush(timeout=1.0)  # bounded; see observability.flush
     return {
         "roles": [s.model_dump() for s in result.roles],
         "ok": result.ok,

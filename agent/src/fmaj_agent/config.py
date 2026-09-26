@@ -79,31 +79,11 @@ VERTEX_LOCATION = os.environ.get("FMAJ_VERTEX_LOCATION", "global")
 #
 # **Set any of these to 0 for unlimited.** That is how production lifts the PoC
 # guard rails without touching code.
-# ┌────────────────────────────────────────────────────────────────────────┐
-# │ UNRESTRICTED-RUN — TEMPORARY. REVERT BEFORE MERGING TO main.           │
-# │                                                                        │
-# │ Both SerpAPI ceilings are off so one deployed search can be watched    │
-# │ working without a budget cutting it short. `MAX_SECONDS` is the only   │
-# │ wall left on a company, and it is deliberately under InvestigateFn's   │
-# │ Lambda timeout (300s) — past that the Lambda is killed before          │
-# │ `investigate_handler` writes its RESULT# row and the company hangs on  │
-# │ `pending` forever.                                                     │
-# │                                                                        │
-# │ `test_poc_defaults_stay_inside_the_serpapi_free_tier` FAILS while this │
-# │ block is in place. That is the point — it is the tripwire that stops   │
-# │ these values reaching prod. Do not skip or weaken it; revert instead:  │
-# │                                                                        │
-# │   git grep -n UNRESTRICTED-RUN                                         │
-# │                                                                        │
-# │ Restore: MAX_WEB_SEARCHES 2 · MAX_WEB_SEARCHES_PER_SEARCH 10 ·         │
-# │          MAX_TOOL_CALLS 8 · MAX_SECONDS 60 · InvestigateFn 150s        │
-# └────────────────────────────────────────────────────────────────────────┘
 MAX_COMPANIES = _limit("FMAJ_MAX_COMPANIES", 40)
-MAX_WEB_SEARCHES = _limit("FMAJ_MAX_WEB_SEARCHES", 0)  # was 2
-# was 10
-MAX_WEB_SEARCHES_PER_SEARCH = _limit("FMAJ_MAX_WEB_SEARCHES_PER_SEARCH", 0)
-MAX_TOOL_CALLS = _limit("FMAJ_MAX_TOOL_CALLS", 0)  # was 8
-MAX_SECONDS = _limit("FMAJ_MAX_SECONDS", 240)  # was 60
+MAX_WEB_SEARCHES = _limit("FMAJ_MAX_WEB_SEARCHES", 2)
+MAX_WEB_SEARCHES_PER_SEARCH = _limit("FMAJ_MAX_WEB_SEARCHES_PER_SEARCH", 10)
+MAX_TOOL_CALLS = _limit("FMAJ_MAX_TOOL_CALLS", 8)
+MAX_SECONDS = _limit("FMAJ_MAX_SECONDS", 60)
 
 ROLE_MATCH_THRESHOLD = _ratio("FMAJ_ROLE_MATCH_THRESHOLD", 0.8)
 

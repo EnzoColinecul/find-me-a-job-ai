@@ -526,3 +526,42 @@ def test_stop_refuses_someone_elses_search(table) -> None:
     _user(table)
     sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
     assert searches.stop_search("someone-else", sid) is None
+
+
+# ── Langfuse: the API opens the search's trace ─────────────────────────────
+
+def test_create_search_opens_the_search_trace_without_user_data(table) -> None:
+    import json
+
+    from fmaj_agent import observability
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    lf = Langfuse(public_key="pk-lf-api-test", secret_key="sk-lf-api-test",
+                  base_url="http://127.0.0.1:9", mask=observability._mask,
+                  span_exporter=exporter, tracer_provider=TracerProvider())
+    observability.set_client(lf)
+    _user(table)
+    req = SearchRequest(**VALID, query_text="I'm Jane, jane@example.com, 0400 000 000",
+                        location_label="12 Private Lane, Surry Hills")
+    meta = searches.create_search("u1", req)
+    lf.flush()
+
+    (span,) = [s for s in exporter.get_finished_spans() if s.name == "api.create_search"]
+    trace_id = observability.trace_id_for(meta["search_id"])
+    assert format(span.context.trace_id, "032x") == trace_id
+    attrs = dict(span.attributes)
+    assert attrs["langfuse.trace.metadata.search_id"] == meta["search_id"]
+    assert attrs["langfuse.trace.metadata.role"] == "chef"
+    # the pipeline isn't configured in tests, so the span says so
+    assert attrs["langfuse.observation.level"] == "WARNING"
+    blob = json.dumps(attrs, default=str)
+    for private in ("u1", "jane", "0400", "Private Lane", "-33.87", "151.21"):
+        assert private not in blob, private
+
+    # recorded on the item for lookup, never part of the API response
+    stored = table.store[(f"SEARCH#{meta['search_id']}", "META")]
+    assert stored["observability_trace_id"] == trace_id
+    assert "observability_trace_id" not in (searches.get_search("u1", meta["search_id"]) or {})

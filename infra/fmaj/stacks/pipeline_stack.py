@@ -65,6 +65,9 @@ class PipelineStack(cdk.Stack):
             "FMAJ_TABLE_NAME": data.table.table_name,
             "FMAJ_LLM_PROVIDER": config.llm_provider,
             "FMAJ_GCP_SA_SECRET": f"fmaj/{config.stage}/gcp-sa-key",
+            # Langfuse Cloud keys — every step of a search writes to its trace.
+            # Missing secret = tracing off, never a failed search.
+            "FMAJ_LANGFUSE_SECRET": f"fmaj/{config.stage}/langfuse",
         }
 
         def make_fn(name: str, handler: str, timeout_s: int, memory: int) -> lambda_.Function:
@@ -84,12 +87,11 @@ class PipelineStack(cdk.Stack):
             )
 
         discover_fn = make_fn("DiscoverFn", "fmaj_agent.handlers.discover_handler", 120, 512)
-        # UNRESTRICTED-RUN — TEMPORARY, restore to 150 with the config.py budgets.
         # Must stay ABOVE fmaj_agent.config.MAX_SECONDS: the in-code wall has to
         # fire first, or the Lambda is killed before investigate_handler writes
         # its RESULT# row and that company sits on `pending` for good.
         investigate_fn = make_fn(
-            "InvestigateFn", "fmaj_agent.handlers.investigate_handler", 300, 1024
+            "InvestigateFn", "fmaj_agent.handlers.investigate_handler", 150, 1024
         )
         aggregate_fn = make_fn("AggregateFn", "fmaj_agent.handlers.aggregate_handler", 30, 256)
         fail_fn = make_fn("FailFn", "fmaj_agent.handlers.fail_handler", 30, 256)
@@ -98,8 +100,10 @@ class PipelineStack(cdk.Stack):
         for fn in (discover_fn, investigate_fn, aggregate_fn, fail_fn):
             data.table.grant_read_write_data(fn)
         secret_names = {
-            discover_fn: ["places-key"],
-            investigate_fn: ["adzuna", "web-search-key", "gcp-sa-key"],
+            discover_fn: ["places-key", "langfuse"],
+            investigate_fn: ["adzuna", "web-search-key", "gcp-sa-key", "langfuse"],
+            aggregate_fn: ["langfuse"],
+            fail_fn: ["langfuse"],
         }
         for fn, names in secret_names.items():
             for name in names:

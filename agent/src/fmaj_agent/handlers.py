@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import boto3
 
-from fmaj_agent import config
+from fmaj_agent import config, observability
 from fmaj_agent.budget import DynamoSearchBudget
 from fmaj_agent.discovery import discover
 from fmaj_agent.models import Company
@@ -82,11 +82,46 @@ def _put_step(search_id: str, step: TraceStep) -> None:
                        step.tool, search_id, exc_info=True)
 
 
+def _role_labels(roles: list) -> list[str]:
+    # roles arrive as RoleSpec dicts, or plain strings on older searches
+    return [r["label"] if isinstance(r, dict) else str(r) for r in roles]
+
+
+def _search_trace(search_id: str, roles: list, **meta) -> dict:
+    """Trace-level metadata/tags shared by every pipeline step of a search."""
+    labels = _role_labels(roles)
+    return {
+        "search_id": search_id,
+        "trace_meta": {"search_id": search_id, "role": ", ".join(labels)[:200],
+                       "provider": config.LLM_PROVIDER, **meta},
+        "tags": [f"stage:{config.STAGE}", f"provider:{config.LLM_PROVIDER}",
+                 *[f"role:{r}" for r in labels[:3]]],
+    }
+
+
 def discover_handler(event: dict, _context=None) -> dict:
     """Input: {search_id, lat, lng, radius_km, roles}. Writes queued RESULT# items.
 
     Output: {search_id, companies: [company dicts]} consumed by the Map state.
     """
+    try:
+        with observability.observe(
+            "discovery", metadata={"radius_km": event.get("radius_km")},
+            **_search_trace(event["search_id"], list(event.get("roles") or [])),
+        ) as obs:
+            out = _discover(event)
+            companies = out["companies"]
+            countries: dict[str, int] = {}
+            for c in companies:
+                code = c.get("country_code") or "unknown"
+                countries[code] = countries.get(code, 0) + 1
+            obs.update(output={"companies": len(companies), "countries": countries})
+            return out
+    finally:
+        observability.flush()
+
+
+def _discover(event: dict) -> dict:
     search_id = event["search_id"]
     table = _get_table()
     table.update_item(
@@ -133,8 +168,7 @@ def discover_handler(event: dict, _context=None) -> dict:
     )
     logger.info("search %s budgets: %s", search_id, config.budget_summary())
     n = len(result.companies)
-    # roles arrive as RoleSpec dicts, or plain strings on older searches
-    labels = [r["label"] if isinstance(r, dict) else str(r) for r in event["roles"]]
+    labels = _role_labels(event["roles"])
     _put_step(search_id, TraceStep(
         tag=Tag.SEARCHING, tool="discovery",
         text=", ".join(labels[:2]) or "nearby businesses",
@@ -158,11 +192,16 @@ def investigate_handler(event: dict, _context=None) -> dict:
     # The budget is what lets MAX_COMPANIES be a product decision again: every
     # Lambda under this search spends against one counter, so raising the number
     # of companies no longer multiplies the SerpAPI bill.
-    run = investigate(
-        company,
-        on_step=lambda s: _put_step(search_id, s),
-        budget=DynamoSearchBudget(search_id, table=_get_table()),
-    )
+    try:
+        run = investigate(
+            company,
+            on_step=lambda s: _put_step(search_id, s),
+            budget=DynamoSearchBudget(search_id, table=_get_table()),
+            search_id=search_id,
+        )
+    finally:
+        # The Lambda freezes on return; hand the spans over first (bounded).
+        observability.flush()
     f = run.findings
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
@@ -193,6 +232,12 @@ def aggregate_handler(event: dict, _context=None) -> dict:
     counts: dict[str, int] = {}
     for r in results:
         counts[r["opportunity_type"]] = counts.get(r["opportunity_type"], 0) + 1
+    try:
+        with observability.observe("aggregate", **_search_trace(search_id, [])) as obs:
+            obs.update(output={"status": "completed", "companies": len(results),
+                               "counts": counts})
+    finally:
+        observability.flush()
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET #s = :s, completed_at = :t, opportunity_counts = :c",
@@ -214,4 +259,15 @@ def fail_handler(event: dict, _context=None) -> dict:
             ExpressionAttributeValues={":s": "failed", ":t": _now()},
         )
     logger.error("search %s failed: %s", search_id, event.get("error"))
+    if search_id:
+        # Only the error *type* from Step Functions: its Cause can carry a stack
+        # trace with request payloads in it.
+        err = event.get("error") or {}
+        error_type = str(err.get("Error", "unknown")) if isinstance(err, dict) else "unknown"
+        try:
+            with observability.observe("search.failed", **_search_trace(search_id, [])) as obs:
+                obs.update(level="ERROR", status_message=error_type,
+                           output={"status": "failed", "error": error_type})
+        finally:
+            observability.flush()
     return {"search_id": search_id, "status": "failed"}
