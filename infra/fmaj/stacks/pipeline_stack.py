@@ -87,12 +87,11 @@ class PipelineStack(cdk.Stack):
             )
 
         discover_fn = make_fn("DiscoverFn", "fmaj_agent.handlers.discover_handler", 120, 512)
-        # UNRESTRICTED-RUN — TEMPORARY, restore to 150 with the config.py budgets.
         # Must stay ABOVE fmaj_agent.config.MAX_SECONDS: the in-code wall has to
         # fire first, or the Lambda is killed before investigate_handler writes
         # its RESULT# row and that company sits on `pending` for good.
         investigate_fn = make_fn(
-            "InvestigateFn", "fmaj_agent.handlers.investigate_handler", 300, 1024
+            "InvestigateFn", "fmaj_agent.handlers.investigate_handler", 150, 1024
         )
         aggregate_fn = make_fn("AggregateFn", "fmaj_agent.handlers.aggregate_handler", 30, 256)
         fail_fn = make_fn("FailFn", "fmaj_agent.handlers.fail_handler", 30, 256)
