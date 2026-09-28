@@ -110,6 +110,19 @@ def _run_tool(dispatch: dict, name: str, args: dict):
     return dispatch[name](args) if name in dispatch else None
 
 
+@dataclass(frozen=True)
+class EvidenceRecord:
+    """Ephemeral provenance linking a claim to one company and one tool result."""
+
+    company_id: str
+    claim_type: str
+    claim_value: str
+    source_url: str
+    source_type: str
+    observed_at: float
+    hiring_signal: bool = False
+
+
 @dataclass
 class AgentRun:
     findings: Findings
@@ -139,6 +152,8 @@ class AgentRun:
     observed_urls: set[str] = field(default_factory=set)
     title_sources: dict[str, set[str]] = field(default_factory=dict)
     location_uncertain_titles: set[str] = field(default_factory=set)
+    company_id: str = ""
+    evidence_records: list[EvidenceRecord] = field(default_factory=list)
     #: True once any fetched page invited applications ("send us your resume",
     #: "we're hiring"). It is what lets a generic `info@` count as a lead.
     saw_hiring_signal: bool = False
@@ -147,6 +162,15 @@ class AgentRun:
     forced_report: bool = False
     #: Cooperative stop observed between bounded provider/tool calls.
     cancelled: bool = False
+
+    def has_evidence(self, claim_type: str, claim_value: str, source_url: str) -> bool:
+        return any(
+            record.company_id == self.company_id
+            and record.claim_type == claim_type
+            and record.claim_value == claim_value
+            and record.source_url == source_url
+            for record in self.evidence_records
+        )
 
     def stats(self) -> dict:
         return {
@@ -207,7 +231,8 @@ def _verify_listing(findings: Findings, run: AgentRun, roles: list[str]) -> tupl
     key = title.lower()
     title_sources = run.title_sources.get(key, set())
     observed_links = [url for url in findings.links
-                      if url in run.observed_urls and url in title_sources]
+                      if url in run.observed_urls and url in title_sources
+                      and run.has_evidence("vacancy_title", key, url)]
     if not title:
         why = "reported a live listing without naming the vacancy"
     elif key in run.verified_titles and observed_links:
@@ -281,10 +306,15 @@ def _verify_email(findings: Findings, run: AgentRun) -> tuple[Findings, str]:
         if key not in run.observed_emails:
             unseen.append(email)
         elif key in run.observed_email_sources:
-            source_url, hiring_signal = run.observed_email_sources[key]
-            if source_url not in findings.links:
+            source_url, _ = run.observed_email_sources[key]
+            evidence = next((record for record in run.evidence_records
+                             if record.company_id == run.company_id
+                             and record.claim_type == "email"
+                             and record.claim_value == key
+                             and record.source_url == source_url), None)
+            if source_url not in findings.links or evidence is None:
                 unseen.append(email)
-            elif RECRUITMENT_EMAIL.match(key) or hiring_signal:
+            elif RECRUITMENT_EMAIL.match(key) or evidence.hiring_signal:
                 kept.append(run.observed_emails[key])
             else:
                 weak.append(email)
@@ -321,7 +351,8 @@ def _verify(findings: Findings, run: AgentRun, roles: list[str]) -> tuple[Findin
     findings, why = _verify_listing(findings, run, roles)
     findings, email_why = _verify_email(findings, run)
     if findings.opportunity_type is OpportunityType.CAREERS_PAGE:
-        kept_links = [url for url in findings.links if url in run.observed_urls]
+        kept_links = [url for url in findings.links
+                      if url in run.observed_urls and run.has_evidence("url", url, url)]
         if not kept_links:
             return Findings(opportunity_type=OpportunityType.NONE,
                             evidence="dropped: no careers link was returned by a tool",
@@ -526,7 +557,8 @@ def _record_outcome(obs, run: AgentRun) -> None:
 def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | None,
                  obs, should_stop: Callable[[], bool] | None = None) -> AgentRun:
     budget = budget or NoSharedBudget()
-    run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
+    run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE),
+                   company_id=company.place_id)
     dispatch = _dispatch_for(company)
     start = time.monotonic()
 
@@ -658,9 +690,27 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                     for title in role_match.observed_titles(tu.name, result):
                         run.observed_titles.setdefault(title.lower(), title)
                     if result is not None and result.ok:
-                        run.observed_urls.update(_observed_urls(tu.name, result))
+                        urls = _observed_urls(tu.name, result)
+                        run.observed_urls.update(urls)
+                        for source_url in urls:
+                            run.evidence_records.append(EvidenceRecord(
+                                company_id=company.place_id,
+                                claim_type="url",
+                                claim_value=source_url,
+                                source_url=source_url,
+                                source_type=tu.name,
+                                observed_at=time.time(),
+                            ))
                         for title, source_url in _title_sources(tu.name, result):
                             run.title_sources.setdefault(title.lower(), set()).add(source_url)
+                            run.evidence_records.append(EvidenceRecord(
+                                company_id=company.place_id,
+                                claim_type="vacancy_title",
+                                claim_value=title.lower(),
+                                source_url=source_url,
+                                source_type=tu.name,
+                                observed_at=time.time(),
+                            ))
                         if tu.name == "search_jobs_adzuna":
                             run.location_uncertain_titles |= {
                                 str(job.get("title") or "").lower()
@@ -676,6 +726,16 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                                 run.observed_email_sources.setdefault(
                                     key, (str(result.data.get("url") or ""), bool(result.data.get("hiring_signal")))
                                 )
+                                email_url = str(result.data.get("url") or "")
+                                run.evidence_records.append(EvidenceRecord(
+                                    company_id=company.place_id,
+                                    claim_type="email",
+                                    claim_value=key,
+                                    source_url=email_url,
+                                    source_type=tu.name,
+                                    observed_at=time.time(),
+                                    hiring_signal=bool(result.data.get("hiring_signal")),
+                                ))
                     gate = role_match.GATES.get(tu.name)
                     if gate is not None and result is not None and company.roles:
                         gated_ok = result.ok

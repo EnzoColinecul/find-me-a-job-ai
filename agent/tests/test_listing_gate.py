@@ -8,13 +8,16 @@ import pytest
 
 from fmaj_agent import role_match
 from fmaj_agent.models import Findings, OpportunityType
-from fmaj_agent.orchestrator import AgentRun, _is_board_link, _verify, _verify_listing
+from fmaj_agent.orchestrator import (
+    AgentRun, EvidenceRecord, _is_board_link, _verify, _verify_listing,
+)
 
 ROLES = ["software developer"]
 
 
 def _run(observed=None, verified=None) -> AgentRun:
-    run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
+    run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE),
+                   company_id="test-company")
     run.observed_titles = {t.lower(): t for t in (observed or [])}
     run.verified_titles = {t.lower() for t in (verified or [])}
     run.observed_urls = {
@@ -25,8 +28,17 @@ def _run(observed=None, verified=None) -> AgentRun:
         "https://au.seek.com/X-jobs/at-this-company",
         "https://www.linkedin.com/jobs/view/123",
     }
+    run.evidence_records = [EvidenceRecord(
+        company_id=run.company_id, claim_type="url", claim_value=url,
+        source_url=url, source_type="test", observed_at=1.0,
+    ) for url in run.observed_urls]
     for title in set(observed or []) | set(verified or []):
         run.title_sources[title.lower()] = set(run.observed_urls)
+        run.evidence_records.extend(EvidenceRecord(
+            company_id=run.company_id, claim_type="vacancy_title",
+            claim_value=title.lower(), source_url=url, source_type="test",
+            observed_at=1.0,
+        ) for url in run.observed_urls)
     return run
 
 
@@ -61,6 +73,10 @@ def test_adzuna_listing_labels_unverified_vacancy_location() -> None:
     url = "https://adzuna.example/jobs/1"
     run.observed_urls = {url}
     run.title_sources["chef"] = {url}
+    run.evidence_records.append(EvidenceRecord(
+        company_id=run.company_id, claim_type="vacancy_title", claim_value="chef",
+        source_url=url, source_type="search_jobs_adzuna", observed_at=1.0,
+    ))
     run.location_uncertain_titles.add("chef")
     finding = _listing(links=[url], matched_title="Chef")
     out, why = _verify_listing(finding, run, ["chef"])
@@ -75,6 +91,25 @@ def test_a_verified_title_cannot_bless_a_different_observed_url() -> None:
                        matched_title="Full Stack Engineer")
     out, why = _verify_listing(finding, run, ROLES)
     assert "listing URL that no tool returned" in why
+    assert out.opportunity_type is OpportunityType.NONE
+
+
+def test_evidence_from_another_company_cannot_support_a_listing() -> None:
+    run = _run(verified=["Full Stack Engineer"])
+    run.evidence_records = [
+        record for record in run.evidence_records
+        if record.claim_type != "vacancy_title"
+    ] + [
+        EvidenceRecord(
+            company_id="different-company", claim_type="vacancy_title",
+            claim_value="full stack engineer",
+            source_url="https://au.seek.com/Acme-jobs/at-this-company",
+            source_type="find_seek_company_page", observed_at=2.0,
+        )
+    ]
+    finding = _listing(links=["https://au.seek.com/Acme-jobs/at-this-company"],
+                       matched_title="Full Stack Engineer")
+    out, _ = _verify_listing(finding, run, ROLES)
     assert out.opportunity_type is OpportunityType.NONE
 
 
@@ -302,6 +337,11 @@ def _email_run(observed=(), hiring=False) -> AgentRun:
         e.lower(): ("https://company.example/contact", hiring) for e in observed
     }
     run.observed_urls.add("https://company.example/contact")
+    run.evidence_records.extend(EvidenceRecord(
+        company_id=run.company_id, claim_type="email", claim_value=e.lower(),
+        source_url="https://company.example/contact", source_type="extract_emails",
+        observed_at=1.0, hiring_signal=hiring,
+    ) for e in observed)
     return run
 
 
