@@ -629,6 +629,8 @@ def get_search(sub: str, search_id: str) -> dict | None:
         "search_id": search_id,
         "status": meta["status"],
         "company_errors": int(meta.get("company_errors", 0) or 0),
+        "error_code": meta.get("error_code", ""),
+        "retryable": bool(meta.get("retryable", False)),
         "progress": {"done": done, "total": total_companies},
         "steps": [
             {

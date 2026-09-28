@@ -422,9 +422,14 @@ def test_get_search_includes_results(table) -> None:
         "opportunity_type": "careers_page",
         "links": ["https://cafex.com.au/careers"],
     }
+    table.store[(f"SEARCH#{sid}", "META")].update({
+        "error_code": "workflow_timeout", "retryable": True,
+    })
     found = searches.get_search("u1", sid)
     assert found["total"] == 1
     assert found["results"][0]["company"] == "Cafe X"
+    assert found["error_code"] == "workflow_timeout"
+    assert found["retryable"] is True
 
 
 def test_result_carries_pin_coordinates_when_present(table) -> None:

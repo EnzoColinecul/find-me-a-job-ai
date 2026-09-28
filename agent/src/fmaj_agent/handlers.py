@@ -293,29 +293,44 @@ def fail_handler(event: dict, _context=None) -> dict:
                 execution_input = {}
         if isinstance(execution_input, dict):
             search_id = execution_input.get("search_id", "")
+    detail = event.get("detail") or {}
+    raw_error = event.get("error") or {}
+    raw_name = str(raw_error.get("Error", "")) if isinstance(raw_error, dict) else ""
+    execution_status = str(detail.get("status", "")).upper()
+    if execution_status == "TIMED_OUT" or raw_name == "States.Timeout":
+        error_code, retryable = "workflow_timeout", True
+    elif execution_status == "ABORTED":
+        error_code, retryable = "workflow_aborted", False
+    elif raw_name in {"Lambda.ServiceException", "Lambda.SdkClientException"}:
+        error_code, retryable = "lambda_service_error", True
+    elif raw_name in {"States.Permissions", "AccessDeniedException"}:
+        error_code, retryable = "permission_denied", False
+    else:
+        error_code, retryable = "workflow_failed", False
     if search_id:
         try:
             _get_table().update_item(
                 Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-                UpdateExpression="SET #s = :s, failed_at = :t",
+                UpdateExpression="SET #s = :s, failed_at = :t, error_code = :ec, retryable = :r",
                 ConditionExpression="#s IN (:pending, :running)",
                 ExpressionAttributeNames={"#s": "status"},
                 ExpressionAttributeValues={":s": "failed", ":t": _now(),
-                                           ":pending": "pending", ":running": "running"},
+                                           ":pending": "pending", ":running": "running",
+                                           ":ec": error_code, ":r": retryable},
             )
         except Exception as exc:
             if getattr(exc, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
     logger.error("search %s failed: %s", search_id, event.get("error"))
     if search_id:
-        # Only the error *type* from Step Functions: its Cause can carry a stack
-        # trace with request payloads in it.
-        err = event.get("error") or {}
-        error_type = str(err.get("Error", "unknown")) if isinstance(err, dict) else "unknown"
+        # Never persist Step Functions' Cause: it can contain request data or a
+        # stack trace. Store only the bounded safe code above.
         try:
             with observability.observe("search.failed", **_search_trace(search_id, [])) as obs:
-                obs.update(level="ERROR", status_message=error_type,
-                           output={"status": "failed", "error": error_type})
+                obs.update(level="ERROR", status_message=error_code,
+                           output={"status": "failed", "error_code": error_code,
+                                   "retryable": retryable})
         finally:
             observability.flush()
-    return {"search_id": search_id, "status": "failed"}
+    return {"search_id": search_id, "status": "failed", "error_code": error_code,
+            "retryable": retryable}

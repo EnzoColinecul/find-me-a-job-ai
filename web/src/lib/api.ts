@@ -91,6 +91,8 @@ export interface Search {
   search_id: string;
   status: "pending" | "running" | "completed" | "degraded" | "failed" | "cancelled";
   company_errors?: number;
+  error_code?: string;
+  retryable?: boolean;
   /** How many discovered companies the agent has finished. */
   progress: { done: number; total: number };
   steps: TraceStep[];
