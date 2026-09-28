@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 from fmaj_agent import config, observability, role_match
 from fmaj_agent.budget import NoSharedBudget, SearchBudget
-from fmaj_agent.models import Company, Findings, OpportunityType
+from fmaj_agent.models import Company, Findings, OpportunityType, ToolResult
 from fmaj_agent.providers import get_provider
 from fmaj_agent.tools.impl import RECRUITMENT_EMAIL
 from fmaj_agent.tools import (
@@ -57,9 +57,43 @@ def _dispatch_for(company: Company) -> dict:
     the app AU-only in the first place.
     """
     country = company.country_code
+
+    def host(url: str) -> str:
+        value = (urlparse(url).hostname or "").lower().rstrip(".")
+        return value[4:] if value.startswith("www.") else value
+
+    allowed_hosts = {host(company.website)} if company.website else set()
+    allowed_hosts.discard("")
+
+    def company_url(url: str) -> bool:
+        destination = host(url)
+        return bool(destination and any(
+            destination == allowed or destination.endswith("." + allowed)
+            for allowed in allowed_hosts
+        ))
+
+    def fetch_company_page(url: str):
+        if not company_url(url):
+            return ToolResult(ok=False, reason="URL was not linked from this company's site")
+        return fetch_url(url)
+
+    def discover_careers(url: str):
+        if not company_url(url):
+            return ToolResult(ok=False, reason="URL was not linked from this company's site")
+        result = find_careers_link(url)
+        if result.ok:
+            allowed_hosts.update(filter(None, (host(candidate) for candidate in
+                                                result.data.get("candidates", []))))
+        return result
+
+    def extract_company_emails(url: str):
+        if not company_url(url):
+            return ToolResult(ok=False, reason="URL was not linked from this company's site")
+        return extract_emails(url)
+
     return {
-        "fetch_url": lambda a: fetch_url(a["url"]),
-        "find_careers_link": lambda a: find_careers_link(a["url"]),
+        "fetch_url": lambda a: fetch_company_page(a["url"]),
+        "find_careers_link": lambda a: discover_careers(a["url"]),
         "search_jobs_adzuna": lambda a: search_jobs_adzuna(
             company.name, a["role"], country_code=country, location_context=company.address
         ),
@@ -67,7 +101,7 @@ def _dispatch_for(company: Company) -> dict:
             a["company"], country_code=country
         ),
         "web_search": lambda a: web_search(a["query"]),
-        "extract_emails": lambda a: extract_emails(a["url"]),
+        "extract_emails": lambda a: extract_company_emails(a["url"]),
     }
 
 

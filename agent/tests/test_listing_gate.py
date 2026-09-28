@@ -56,6 +56,18 @@ def test_a_verified_title_stands() -> None:
     assert out.opportunity_type is OpportunityType.JOB_LISTING
 
 
+def test_adzuna_listing_labels_unverified_vacancy_location() -> None:
+    run = _run(verified=["Chef"])
+    url = "https://adzuna.example/jobs/1"
+    run.observed_urls = {url}
+    run.title_sources["chef"] = {url}
+    run.location_uncertain_titles.add("chef")
+    finding = _listing(links=[url], matched_title="Chef")
+    out, why = _verify_listing(finding, run, ["chef"])
+    assert why == ""
+    assert "location has not been confirmed" in out.evidence
+
+
 def test_a_verified_title_cannot_bless_a_different_observed_url() -> None:
     run = _run(verified=["Full Stack Engineer"])
     run.title_sources["full stack engineer"] = {"https://acme.com/careers"}
@@ -146,6 +158,38 @@ def test_cancellation_after_model_turn_blocks_the_next_tool(monkeypatch) -> None
     )
     assert run.cancelled
     assert run.tool_calls == 0
+
+
+def test_fetching_is_scoped_to_the_company_site_and_its_careers_links(monkeypatch) -> None:
+    from fmaj_agent import orchestrator
+    from fmaj_agent.models import Company, ToolResult
+
+    called = []
+
+    def careers(url):
+        called.append(("careers", url))
+        return ToolResult(ok=True, data={"candidates": ["https://jobs.greenhouse.io/acme"]})
+
+    def fetch(url):
+        called.append(("fetch", url))
+        return ToolResult(ok=True, data={"url": url})
+
+    monkeypatch.setattr(orchestrator, "find_careers_link", careers)
+    monkeypatch.setattr(orchestrator, "fetch_url", fetch)
+    dispatch = orchestrator._dispatch_for(Company(
+        place_id="p", name="Acme", address="Melbourne", website="https://www.acme.example",
+        roles=["chef"], country_code="au",
+    ))
+    dispatch["find_careers_link"]({"url": "https://acme.example"})
+    allowed = dispatch["fetch_url"]({"url": "https://jobs.greenhouse.io/acme"})
+    blocked = dispatch["fetch_url"]({"url": "https://other-employer.example/careers"})
+
+    assert allowed.ok
+    assert not blocked.ok and "not linked" in blocked.reason
+    assert called == [
+        ("careers", "https://acme.example"),
+        ("fetch", "https://jobs.greenhouse.io/acme"),
+    ]
 
 
 def test_a_downgrade_with_nothing_left_drops_the_company() -> None:

@@ -109,6 +109,25 @@ def test_adzuna_parses_results(monkeypatch) -> None:
 
 
 @respx.mock
+def test_adzuna_keeps_only_the_bound_employer_and_marks_location_uncertain(monkeypatch) -> None:
+    monkeypatch.setenv("FMAJ_ADZUNA_APP_ID", "id")
+    monkeypatch.setenv("FMAJ_ADZUNA_APP_KEY", "key")
+    respx.get(url__startswith="https://api.adzuna.com/v1/api/jobs/au/search/1").mock(
+        return_value=httpx.Response(200, json={"results": [
+            {"title": "Chef", "company": {"display_name": "Cafe X Pty Ltd"},
+             "location": {"display_name": "Sydney"}, "redirect_url": "https://adzuna/job/1"},
+            {"title": "Chef", "company": {"display_name": "Cafe Y"},
+             "location": {"display_name": "Melbourne"}, "redirect_url": "https://adzuna/job/2"},
+        ]})
+    )
+    result = impl.search_jobs_adzuna("Cafe X", "chef", country_code="au",
+                                    location_context="Melbourne VIC")
+    assert result.ok
+    assert [job["company"] for job in result.data["jobs"]] == ["Cafe X Pty Ltd"]
+    assert result.data["jobs"][0]["location_uncertain"] is True
+
+
+@respx.mock
 def test_adzuna_queries_the_company_s_own_country(monkeypatch) -> None:
     """The country comes from Places, not from a hardcoded `au` in the URL."""
     monkeypatch.setenv("FMAJ_ADZUNA_APP_ID", "id")
