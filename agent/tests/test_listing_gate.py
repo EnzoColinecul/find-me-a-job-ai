@@ -8,7 +8,7 @@ import pytest
 
 from fmaj_agent import role_match
 from fmaj_agent.models import Findings, OpportunityType
-from fmaj_agent.orchestrator import AgentRun, _is_board_link, _verify_listing
+from fmaj_agent.orchestrator import AgentRun, _is_board_link, _verify, _verify_listing
 
 ROLES = ["software developer"]
 
@@ -17,6 +17,16 @@ def _run(observed=None, verified=None) -> AgentRun:
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
     run.observed_titles = {t.lower(): t for t in (observed or [])}
     run.verified_titles = {t.lower() for t in (verified or [])}
+    run.observed_urls = {
+        "https://au.seek.com/Acme-jobs/at-this-company",
+        "https://acme.com/careers", "https://acme.com/careers/grad",
+        "https://au.seek.com/Virtual-IT-Group-jobs/at-this-company",
+        "https://virtualitgroup.com.au/careers",
+        "https://au.seek.com/X-jobs/at-this-company",
+        "https://www.linkedin.com/jobs/view/123",
+    }
+    for title in set(observed or []) | set(verified or []):
+        run.title_sources[title.lower()] = set(run.observed_urls)
     return run
 
 
@@ -44,6 +54,16 @@ def test_a_verified_title_stands() -> None:
     out, why = _verify_listing(f, _run(verified=["Full Stack Engineer"]), ROLES)
     assert why == ""
     assert out.opportunity_type is OpportunityType.JOB_LISTING
+
+
+def test_a_verified_title_cannot_bless_a_different_observed_url() -> None:
+    run = _run(verified=["Full Stack Engineer"])
+    run.title_sources["full stack engineer"] = {"https://acme.com/careers"}
+    finding = _listing(links=["https://au.seek.com/Acme-jobs/at-this-company"],
+                       matched_title="Full Stack Engineer")
+    out, why = _verify_listing(finding, run, ROLES)
+    assert "listing URL that no tool returned" in why
+    assert out.opportunity_type is OpportunityType.NONE
 
 
 def test_a_listing_with_no_title_is_downgraded() -> None:
@@ -82,6 +102,50 @@ def test_a_downgrade_falls_through_to_an_email() -> None:
     out, _ = _verify_listing(f, _run(), ROLES)
     assert out.opportunity_type is OpportunityType.CONTACT_EMAIL
     assert out.emails == ["careers@intuitionsoftech.com"]
+
+
+def test_composed_verify_drops_unobserved_email_after_listing_downgrade() -> None:
+    finding = _listing(
+        links=["https://au.seek.com/X-jobs/at-this-company"],
+        emails=["sales@invented.example"],
+        matched_title="Service Desk Analyst",
+    )
+    out, reason = _verify(finding, _run(), ROLES)
+    assert out.opportunity_type is OpportunityType.NONE
+    assert out.emails == []
+    assert "not read off the company's own page" in reason
+
+
+def test_cancellation_after_model_turn_blocks_the_next_tool(monkeypatch) -> None:
+    from fmaj_agent import orchestrator
+    from fmaj_agent.models import Company
+    from fmaj_agent.providers import ToolUse, Turn
+
+    stopped = False
+
+    class Provider:
+        calls = 0
+
+        def complete(self, *args, **kwargs):
+            nonlocal stopped
+            self.calls += 1
+            if self.calls == 1:
+                return Turn(text='{"plausible": true}')
+            stopped = True
+            return Turn(tool_uses=[ToolUse(
+                id="tool-1", name="fetch_url", input={"url": "https://acme.example"}
+            )])
+
+    provider = Provider()
+    monkeypatch.setattr(orchestrator, "get_provider", lambda: provider)
+    monkeypatch.setattr(orchestrator, "fetch_url", lambda _url: pytest.fail("tool ran after stop"))
+    run = orchestrator.investigate(
+        Company(place_id="p", name="Acme", address="Melbourne", website="https://acme.example",
+                roles=["chef"], country_code="au"),
+        should_stop=lambda: stopped,
+    )
+    assert run.cancelled
+    assert run.tool_calls == 0
 
 
 def test_a_downgrade_with_nothing_left_drops_the_company() -> None:
@@ -190,12 +254,16 @@ def _email_run(observed=(), hiring=False) -> AgentRun:
     run = _run()
     run.observed_emails = {e.lower(): e for e in observed}
     run.saw_hiring_signal = hiring
+    run.observed_email_sources = {
+        e.lower(): ("https://company.example/contact", hiring) for e in observed
+    }
+    run.observed_urls.add("https://company.example/contact")
     return run
 
 
 def _email_finding(*emails, links=(), evidence="found an address") -> Findings:
     return Findings(opportunity_type=OpportunityType.CONTACT_EMAIL,
-                    emails=list(emails), links=list(links),
+                    emails=list(emails), links=list(links) or ["https://company.example/contact"],
                     evidence=evidence, confidence=0.9)
 
 
@@ -252,4 +320,5 @@ def test_other_types_are_untouched_by_the_email_gate() -> None:
                  links=["https://co.example/careers"], emails=["sales@co.example"],
                  evidence="careers page", confidence=0.8)
     out, why = _verify_email(f, _email_run())
-    assert why == "" and out is f
+    assert out.opportunity_type is OpportunityType.CAREERS_PAGE
+    assert out.emails == [] and why

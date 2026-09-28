@@ -41,10 +41,29 @@ class FakeTable:
         # implementation to keep correct, and these are the only three shapes
         # the app ever sends.
         if ConditionExpression is not None:
-            if "free_search_used" in ConditionExpression:
-                if item is None or item.get("free_search_used") is not False:
+            if "#s IN" in ConditionExpression:
+                if item is None or item.get("status") not in {values[":pending"], values[":running"]}:
                     _reject()
-                item["free_search_used"] = True
+                for clause in UpdateExpression.removeprefix("SET ").split(","):
+                    attr, _, placeholder = clause.strip().partition(" = ")
+                    item[names.get(attr, attr)] = values[placeholder.strip()]
+                return
+
+            if "active_search_id" in ConditionExpression:
+                if item is None or item.get("active_search_id") != values[":sid"]:
+                    _reject()
+                item["active_since"] = values[":none"]
+                item["active_search_id"] = values[":none"]
+                return
+
+            if "free_search_used" in ConditionExpression:
+                expected_placeholder = ":" + ConditionExpression.rsplit(":", 1)[1].strip()
+                expected = values[expected_placeholder]
+                if item is None or item.get("free_search_used") is not expected:
+                    _reject()
+                target_placeholder = ":" + UpdateExpression.rsplit(":", 1)[1].strip()
+                item["free_search_used"] = values[target_placeholder]
+                return
                 return
 
             if "active_since" in ConditionExpression:
@@ -191,6 +210,37 @@ def test_create_search_consumes_quota(table) -> None:
     meta = searches.create_search("u1", SearchRequest(**VALID))
     assert meta["status"] == "pending"
     assert table.store[("USER#u1", "PROFILE")]["free_search_used"] is True
+
+
+def test_idempotency_key_returns_the_original_search_without_spending_again(table) -> None:
+    _user(table)
+    first = searches.create_search("u1", SearchRequest(**VALID), "request-key-001")
+    again = searches.create_search("u1", SearchRequest(**VALID), "request-key-001")
+    assert again["search_id"] == first["search_id"]
+    assert table.store[("USER#u1", "PROFILE")]["free_search_used"] is True
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
+
+
+def test_pipeline_start_failure_refunds_quota_month_and_lease(table, monkeypatch) -> None:
+    _user(table)
+    monkeypatch.setattr(searches.settings, "state_machine_arn", "arn:state-machine")
+
+    class BrokenStateMachine:
+        def start_execution(self, **_kwargs):
+            raise ClientError({"Error": {"Code": "AccessDeniedException"}}, "StartExecution")
+
+    monkeypatch.setattr(searches, "_get_sfn", lambda: BrokenStateMachine())
+    with pytest.raises(RuntimeError, match="could not start"):
+        searches.create_search("u1", SearchRequest(**VALID))
+
+    profile = table.store[("USER#u1", "PROFILE")]
+    assert profile["free_search_used"] is False
+    assert profile["active_search_id"] == ""
+    month_item = table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]
+    assert month_item["count"] == 0
+    metas = [v for (pk, sk), v in table.store.items()
+             if pk.startswith("SEARCH#") and sk == "META"]
+    assert len(metas) == 1 and metas[0]["status"] == "failed"
 
 
 def _finish(table, search_id, status="completed"):
@@ -504,9 +554,8 @@ def test_stop_is_rejected_once_the_search_has_finished(table) -> None:
         searches.stop_search("u1", sid)
 
 
-def test_stop_still_cancels_when_the_execution_is_already_gone(table, monkeypatch) -> None:
-    """The pipeline may not be deployed, or the execution already ended. The user
-    asked for it to stop — don't leave it 'running' forever."""
+def test_stop_failure_does_not_claim_cancellation(table, monkeypatch) -> None:
+    """A failed Step Functions stop remains visible; it cannot write a false cancel."""
     _user(table)
     sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
     table.store[(f"SEARCH#{sid}", "META")]["execution_arn"] = "arn:bad"
@@ -519,7 +568,9 @@ def test_stop_still_cancels_when_the_execution_is_already_gone(table, monkeypatc
         "_get_sfn",
         lambda: type("S", (), {"stop_execution": lambda _s, **kw: boom(**kw)})(),
     )
-    assert searches.stop_search("u1", sid)["status"] == "cancelled"
+    with pytest.raises(searches.StopFailed):
+        searches.stop_search("u1", sid)
+    assert searches.get_search("u1", sid)["status"] == "pending"
 
 
 def test_stop_refuses_someone_elses_search(table) -> None:

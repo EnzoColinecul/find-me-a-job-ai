@@ -210,7 +210,7 @@ def test_observed_titles_names_what_the_model_saw() -> None:
     search = ToolResult(ok=True, data={"results": [{"title": "Chef jobs | SEEK"}]})
     assert role_match.observed_titles("find_seek_company_page", seek) == ["Sous Chef"]
     assert role_match.observed_titles("search_jobs_adzuna", adzuna) == ["Chef de Partie"]
-    assert role_match.observed_titles("web_search", search) == ["Chef jobs | SEEK"]
+    assert role_match.observed_titles("web_search", search) == []
     assert role_match.observed_titles("fetch_url", seek) == []
     assert role_match.observed_titles("find_seek_company_page", None) == []
 

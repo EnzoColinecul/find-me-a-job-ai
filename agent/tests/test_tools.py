@@ -1,8 +1,15 @@
 """Tool tests with mocked HTTP (respx). Tools must never raise."""
 import httpx
+import pytest
 import respx
 
 from fmaj_agent.tools import impl
+
+
+@pytest.fixture(autouse=True)
+def _allow_mocked_test_hosts(monkeypatch):
+    """All HTTP destinations here are intercepted by respx; DNS is synthetic."""
+    monkeypatch.setattr(impl, "_safe_destination", lambda _url: (True, ""))
 
 
 @respx.mock
@@ -16,6 +23,23 @@ def test_fetch_url_extracts_text() -> None:
     r = impl.fetch_url("https://robots.example/")
     assert r.ok
     assert "hiring" in r.data["text"].lower()
+
+
+@respx.mock
+def test_fetch_url_extracts_jobposting_title_with_page_provenance() -> None:
+    respx.get("https://jobs.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://jobs.example/careers").mock(return_value=httpx.Response(
+        200,
+        html='''<script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"JobPosting",
+         "title":"Senior Chef","url":"https://jobs.example/private/123"}
+        </script>''',
+    ))
+    result = impl.fetch_url("https://jobs.example/careers")
+    assert result.ok
+    assert result.data["vacancies"] == [
+        {"title": "Senior Chef", "url": "https://jobs.example/careers"}
+    ]
 
 
 @respx.mock

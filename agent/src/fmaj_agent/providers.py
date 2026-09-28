@@ -31,7 +31,7 @@ _RETRY_HINTS = (
     "unavailable",
     "deadline",
 )
-_MAX_ATTEMPTS = 3
+_MAX_ATTEMPTS = 2
 
 
 def _with_retry(fn, what: str):
@@ -45,7 +45,7 @@ def _with_retry(fn, what: str):
             if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
                 raise
             last = exc
-            delay = 2**attempt  # 2s, 4s
+            delay = min(2**attempt, 2)  # bounded 2s backoff
             logger.warning(
                 "%s transient failure (attempt %d/%d), retrying in %ds: %s", what, attempt, _MAX_ATTEMPTS, delay, exc
             )
@@ -74,7 +74,11 @@ class Turn:
 TOOLS = [
     {
         "name": "fetch_url",
-        "description": "Fetch a web page and return its main text (truncated).",
+        "description": (
+            "Fetch an allowed company or careers page and return its main text "
+            "(truncated) plus explicit Schema.org JobPosting titles when present. "
+            "Those titles come from this page only."
+        ),
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
@@ -245,8 +249,13 @@ class BedrockProvider(Provider):
 
     def __init__(self) -> None:
         import boto3
+        from botocore.config import Config
 
-        self._client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
+        self._client = boto3.client(
+            "bedrock-runtime", region_name=config.AWS_REGION,
+            config=Config(connect_timeout=3, read_timeout=10,
+                          retries={"mode": "standard", "total_max_attempts": 1}),
+        )
 
     @staticmethod
     def _to_messages(messages: list[dict]) -> list[dict]:
@@ -338,7 +347,10 @@ class GeminiProvider(Provider):
             vertexai=True,
             project=config.VERTEX_PROJECT,
             location=config.VERTEX_LOCATION,
-            http_options=genai_types.HttpOptions(timeout=60_000),  # ms — never hang
+            # The API Lambda has a 30s timeout and agent budget is 60s. Keep
+            # each network attempt short enough that the bounded retry policy
+            # cannot consume either whole invocation by itself.
+            http_options=genai_types.HttpOptions(timeout=10_000),
         )
 
     def _to_contents(self, messages: list[dict]) -> list:

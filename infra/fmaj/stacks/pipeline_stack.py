@@ -6,6 +6,8 @@ runs `pip install` inside the Lambda build image).
 import aws_cdk as cdk
 from aws_cdk import (
     BundlingOptions,
+    aws_events as events,
+    aws_events_targets as events_targets,
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_secretsmanager as sm,
@@ -144,6 +146,7 @@ class PipelineStack(cdk.Stack):
 
         discover_step.add_catch(fail_step, result_path="$.error")
         map_step.add_catch(fail_step, result_path="$.error")
+        aggregate_step.add_catch(fail_step, result_path="$.error")
 
         definition = discover_step.next(map_step).next(aggregate_step)
 
@@ -153,6 +156,28 @@ class PipelineStack(cdk.Stack):
             state_machine_name=f"fmaj-{config.stage}-search",
             definition_body=sfn.DefinitionBody.from_chainable(definition),
             timeout=cdk.Duration.minutes(15),
+        )
+
+        # A state-machine timeout is an execution-level failure and cannot be
+        # caught by a Task/Map Catch. Reconcile it independently from the
+        # execution-status event so SEARCH#META cannot remain "running" forever.
+        reconcile = events.Rule(
+            self,
+            "ReconcileTerminalExecutionFailures",
+            event_pattern=events.EventPattern(
+                source=["aws.states"],
+                detail_type=["Step Functions Execution Status Change"],
+                detail={
+                    "stateMachineArn": [self.state_machine.state_machine_arn],
+                    "status": ["FAILED", "TIMED_OUT", "ABORTED"],
+                },
+            ),
+        )
+        reconcile.add_target(
+            events_targets.LambdaFunction(
+                fail_fn,
+                event=events.RuleTargetInput.from_object({"detail": events.EventField.from_path("$.detail")}),
+            )
         )
 
         cdk.CfnOutput(self, "StateMachineArn", value=self.state_machine.state_machine_arn)

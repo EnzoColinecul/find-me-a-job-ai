@@ -92,11 +92,13 @@ def summarise_tool_result(name: str, args: dict, result) -> tuple[Tag, str]:
     if result is None:
         return Tag.CHECKING, ""
 
-    data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
-
-    if not data.get("ok", True):
-        reason = str(data.get("reason") or data.get("error") or "no result")
+    envelope = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+    if not envelope.get("ok", True):
+        reason = str(envelope.get("reason") or envelope.get("error") or "no result")
         return Tag.SKIPPING, reason[:60]
+    # ToolResult serializes as {ok, data: {...}, reason}; read its actual payload.
+    # Keep support for plain mappings used by older external callers.
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope
 
     if name == "search_jobs_adzuna":
         n = len(data.get("jobs") or [])
@@ -134,8 +136,8 @@ def summarise_tool_result(name: str, args: dict, result) -> tuple[Tag, str]:
             return Tag.FOUND, f"{n} email{'s' if n != 1 else ''}, page invites applications"
         return Tag.CHECKING, f"{n} email{'s' if n != 1 else ''}, no hiring signal"
     if name == "find_careers_link":
-        url = data.get("url") or ""
-        return (Tag.FOUND, "careers page") if url else (Tag.CHECKING, "none found")
+        candidates = data.get("candidates") or []
+        return (Tag.FOUND, "careers page") if candidates else (Tag.CHECKING, "none found")
     if name == "fetch_url":
         return Tag.CHECKING, _host(str(args.get("url", "")))
 

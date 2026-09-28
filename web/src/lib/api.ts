@@ -89,7 +89,8 @@ export interface TraceStep {
 
 export interface Search {
   search_id: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: "pending" | "running" | "completed" | "degraded" | "failed" | "cancelled";
+  company_errors?: number;
   /** How many discovered companies the agent has finished. */
   progress: { done: number; total: number };
   steps: TraceStep[];
@@ -161,6 +162,7 @@ async function authed(path: string, init?: RequestInit): Promise<Response> {
 export async function createSearch(params: SearchParams): Promise<string> {
   const resp = await authed("/searches", {
     method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(params),
   });
   if (!resp.ok) await fail(resp, "Couldn't start that search");

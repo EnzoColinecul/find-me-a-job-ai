@@ -6,7 +6,9 @@ name: Deploy
 # Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_oidc-policy.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 concurrency:
@@ -23,9 +25,12 @@ env:
 
 jobs:
   deploy-test:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -56,9 +61,7 @@ jobs:
       - name: Smoke test
         run: |
           URL="${{ vars.TEST_API_URL }}"
-          if [ -z "$URL" ]; then
-            echo "TEST_API_URL not set yet — skipping smoke test"; exit 0
-          fi
+          test -n "$URL" || { echo "::error::TEST_API_URL must be configured"; exit 1; }
           code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")
           echo "GET $URL/health -> $code"
           [ "$code" = "200" ]

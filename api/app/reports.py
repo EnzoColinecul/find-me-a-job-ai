@@ -370,6 +370,14 @@ def build_pdf(search: dict) -> bytes:
     pdf.set_title(_t("Find Me A Job AI — job search report"))
     pdf.add_page()
     _title_block(pdf, search)
+    if search.get("status") == "degraded":
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(*MUTED)
+        count = int(search.get("company_errors", 0) or 0)
+        pdf.multi_cell(0, 5, _t(
+            f"Partial search: {count} compan{'y' if count == 1 else 'ies'} could not be checked."
+        ))
+        pdf.ln(2)
 
     groups = _grouped(search.get("results", []))
     if not any(items for _, items in groups):
@@ -389,7 +397,7 @@ def build_pdf(search: dict) -> bytes:
 
 
 # ── S3 storage + presigning ──────────────────────────────────────────────────
-_TERMINAL = frozenset({"completed", "cancelled"})
+_TERMINAL = frozenset({"completed", "degraded", "cancelled"})
 _PRESIGN_TTL = 3600  # 1 hour is plenty for a click-through download
 
 _s3 = None

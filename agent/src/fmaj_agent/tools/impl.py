@@ -7,8 +7,11 @@ exception is `find_seek_company_page`, which reads the vacancy *titles* off one
 robots-allowed employer page to check they match the role; see its docstring.
 """
 
+import json
 import re
-import urllib.robotparser
+import ipaddress
+import socket
+import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -18,7 +21,7 @@ from bs4 import BeautifulSoup
 from fmaj_agent import secrets
 from fmaj_agent.models import ToolResult
 
-USER_AGENT = "FindMeAJobBot/0.1 (+https://findmeajob.example/bot)"
+USER_AGENT = "FindMeAJobBot/0.1 (+https://github.com/EnzoColinecul/find-me-a-job-ai)"
 TIMEOUT = 10.0
 MAX_CHARS = 4000
 
@@ -70,44 +73,233 @@ HIRING_INVITATION = re.compile(
     re.I,
 )
 
-_robot_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
+_robot_cache: dict[str, tuple[float, str | None, int | None]] = {}
+ROBOTS_TTL = 3600
+MAX_REDIRECTS = 5
+BOARD_HOSTS = ("seek.com", "seek.co.nz", "linkedin.com", "indeed.com", "adzuna.com", "jora.com", "glassdoor.com")
+
+
+def _safe_destination(url: str) -> tuple[bool, str]:
+    """Reject non-web URLs and destinations that resolve to non-public IP space."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False, "only public http/https URLs are allowed"
+        if parsed.username or parsed.password or parsed.port not in (None, 80, 443):
+            return False, "URL credentials or non-standard ports are not allowed"
+        host = parsed.hostname.rstrip(".").lower()
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            return False, "private network destinations are not allowed"
+        try:
+            addresses = {ipaddress.ip_address(host)}
+        except ValueError:
+            addresses = {ipaddress.ip_address(row[4][0]) for row in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
+        if not addresses or any(not ip.is_global for ip in addresses):
+            return False, "private, loopback, and link-local destinations are not allowed"
+        return True, ""
+    except Exception:
+        return False, "could not validate destination"
+
+
+def _board_listing_url(url: str) -> bool:
+    """True for board listing bodies; employer-title inspection is separately scoped."""
+    try:
+        parsed = urlparse(url)
+        host, path = (parsed.hostname or "").lower(), parsed.path.lower()
+        if not any(host == d or host.endswith("." + d) for d in BOARD_HOSTS):
+            return False
+        if "seek.com" in host and path.endswith("/at-this-company") and not parsed.query:
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def _request_public(url: str, *, purpose: str = "page", timeout: float = TIMEOUT) -> httpx.Response:
+    """Follow redirects manually, revalidating DNS/IP and conduct at each hop."""
+    current = url
+    initial = url
+    deadline = time.monotonic() + timeout
+    for _ in range(MAX_REDIRECTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("outbound request deadline exceeded")
+        safe, reason = _safe_destination(current)
+        if not safe:
+            raise ValueError(reason)
+        if purpose == "page" and _board_listing_url(current):
+            raise ValueError("fetching job-board listing pages is not permitted")
+        if purpose == "page" and current != initial and not _allowed(current):
+            raise ValueError("redirect destination is disallowed by robots.txt")
+        response = httpx.get(current, headers={"User-Agent": USER_AGENT}, timeout=remaining, follow_redirects=False)
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response
+        location = response.headers.get("location")
+        if not location:
+            return response
+        current = urljoin(str(response.url), location)
+    raise ValueError("too many redirects")
+
+
+def _robots_can_fetch(body: str, url: str) -> bool:
+    """Apply the relevant robots groups, including '*' and '$' path patterns.
+
+    ``urllib.robotparser`` treats a rule such as ``Disallow: */job/`` as a
+    literal prefix and allows the path. Boards use this pattern to disallow
+    listing bodies, so apply the wildcard operators explicitly here.
+    """
+    groups: list[tuple[list[str], list[tuple[bool, str]]]] = []
+    agents: list[str] = []
+    rules: list[tuple[bool, str]] = []
+
+    def finish_group() -> None:
+        nonlocal agents, rules
+        if agents:
+            groups.append((agents, rules))
+        agents, rules = [], []
+
+    for raw in body.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        directive, value = (part.strip() for part in line.split(":", 1))
+        directive = directive.lower()
+        if directive == "user-agent":
+            if rules:
+                finish_group()
+            agents.append(value.lower())
+        elif directive in {"allow", "disallow"} and agents and value:
+            rules.append((directive == "allow", value))
+    finish_group()
+
+    product = USER_AGENT.split("/", 1)[0].lower()
+    matches: list[tuple[int, list[tuple[bool, str]]]] = []
+    for group_agents, group_rules in groups:
+        specificity = max(
+            (len(agent) for agent in group_agents if agent == "*" or agent in product),
+            default=-1,
+        )
+        if specificity >= 0:
+            matches.append((specificity, group_rules))
+    if not matches:
+        return True
+
+    best_specificity = max(score for score, _ in matches)
+    target = urlparse(url).path or "/"
+    if urlparse(url).query:
+        target += "?" + urlparse(url).query
+    applicable: list[tuple[int, bool]] = []
+    for score, group_rules in matches:
+        if score != best_specificity:
+            continue
+        for allow, pattern in group_rules:
+            end_anchor = pattern.endswith("$")
+            pattern = pattern[:-1] if end_anchor else pattern
+            expression = "^" + ".*".join(re.escape(part) for part in pattern.split("*"))
+            if end_anchor:
+                expression += "$"
+            if re.search(expression, target):
+                applicable.append((len(pattern.replace("*", "")), allow))
+    if not applicable:
+        return True
+    specificity = max(length for length, _ in applicable)
+    return any(allow for length, allow in applicable if length == specificity)
 
 
 def _allowed(url: str) -> bool:
-    """robots.txt check; on any doubt/error, allow (fail-open, we fetch few pages).
+    """robots.txt check; unknown/error policy fetches fail closed.
 
     Fetched via httpx WITH a timeout — RobotFileParser.read() uses urllib with no
     timeout and hangs forever on hosts that black-hole bot connections.
     """
     try:
         parts = urlparse(url)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            return False
         root = f"{parts.scheme}://{parts.netloc}"
-        rp = _robot_cache.get(root)
-        if root not in _robot_cache:
-            rp = None
+        cached = _robot_cache.get(root)
+        if cached and cached[0] > time.monotonic():
+            _, body, status = cached
+        else:
+            body, status = None, None
             try:
-                resp = httpx.get(
-                    f"{root}/robots.txt", timeout=5, headers={"User-Agent": USER_AGENT}, follow_redirects=True
-                )
-                if resp.status_code == 200:
-                    parser = urllib.robotparser.RobotFileParser()
-                    parser.parse(resp.text.splitlines())
-                    rp = parser
+                resp = _request_public(f"{root}/robots.txt", purpose="robots", timeout=5)
+                status = resp.status_code
+                if status == 200:
+                    body = resp.text
             except Exception:
-                rp = None  # unreachable/unreadable -> allow
-            _robot_cache[root] = rp  # type: ignore[assignment]
-        return rp.can_fetch(USER_AGENT, url) if rp else True
+                status = 0
+            _robot_cache[root] = (time.monotonic() + ROBOTS_TTL, body, status)
+        if status == 404:
+            return True
+        if status != 200 or body is None:
+            return False
+        return _robots_can_fetch(body, url)
     except Exception:
-        return True
+        # A robots lookup that times out or cannot be parsed is not permission
+        # to crawl. Fail closed so an outage cannot silently bypass site policy.
+        return False
 
 
 def _get(url: str) -> httpx.Response:
-    return httpx.get(
-        url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=TIMEOUT,
-        follow_redirects=True,
-    )
+    return _request_public(url, purpose="page")
+
+
+def _job_postings(html: str, source_url: str) -> list[dict[str, str]]:
+    """Read explicit Schema.org JobPosting titles from the fetched page only."""
+    soup = BeautifulSoup(html, "html.parser")
+    postings: list[dict[str, str]] = []
+
+    def visit(value) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            types = value.get("@type", [])
+            if isinstance(types, str):
+                types = [types]
+            if any(str(kind).rsplit("/", 1)[-1].lower() == "jobposting" for kind in types):
+                title = str(value.get("title") or "").strip()
+                if title and not any(row["title"] == title for row in postings):
+                    postings.append({"title": title[:160], "url": source_url})
+            for key, child in value.items():
+                if key == "@graph":
+                    visit(child)
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            visit(json.loads(script.string or script.get_text()))
+        except (TypeError, ValueError):
+            continue
+    return postings[:20]
+
+
+def check_link_status(url: str) -> bool | None:
+    """Check a link without browser impersonation or disallowed page-body GETs.
+
+    None means the status could not be established under the same robots, SSRF,
+    and board-conduct rules as production tools.
+    """
+    current = url
+    try:
+        for _ in range(MAX_REDIRECTS + 1):
+            safe, _ = _safe_destination(current)
+            if not safe or _board_listing_url(current) or not _allowed(current):
+                return None
+            response = httpx.head(current, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT,
+                                  follow_redirects=False)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not location:
+                    return None
+                current = urljoin(str(response.url), location)
+                continue
+            if response.status_code in {401, 403, 405, 406, 409, 429, 503}:
+                return None
+            return response.status_code < 400
+    except Exception:
+        return None
+    return None
 
 
 def fetch_url(url: str) -> ToolResult:
@@ -119,12 +311,14 @@ def fetch_url(url: str) -> ToolResult:
         if resp.is_error:
             return ToolResult(ok=False, reason=f"http {resp.status_code}")
         text = trafilatura.extract(resp.text) or ""
+        vacancies = _job_postings(resp.text, str(resp.url))
         return ToolResult(
             ok=True,
             data={
                 "url": str(resp.url),
                 "text": text[:MAX_CHARS],
                 "html_len": len(resp.text),
+                "vacancies": vacancies,
                 # Whether this page invites applications. It is what lets a
                 # generic `info@` count as a lead — see `extract_emails`.
                 "hiring_signal": bool(HIRING_INVITATION.search(text)),
@@ -185,7 +379,16 @@ ADZUNA_COUNTRIES = frozenset(
 )
 
 
-def search_jobs_adzuna(company: str, role: str, country_code: str | None = None) -> ToolResult:
+def _company_name_matches(expected: str, observed: str) -> bool:
+    """Conservative employer binding; unknown aliases are intentionally rejected."""
+    ignored = {"pty", "ltd", "limited", "inc", "llc", "corp", "company", "co"}
+    clean = lambda value: {w for w in re.sub(r"[^a-z0-9]+", " ", value.lower()).split() if w not in ignored}
+    wanted, actual = clean(expected), clean(observed)
+    return bool(wanted and actual and (wanted <= actual or actual <= wanted))
+
+
+def search_jobs_adzuna(company: str, role: str, country_code: str | None = None,
+                       location_context: str = "") -> ToolResult:
     """Official Adzuna API job search for one company, in that company's country.
 
     `country_code` is ISO-3166 alpha-2, taken from the Places result for this
@@ -231,9 +434,13 @@ def search_jobs_adzuna(company: str, role: str, country_code: str | None = None)
                 "company": (j.get("company") or {}).get("display_name"),
                 "location": (j.get("location") or {}).get("display_name"),
                 "url": j.get("redirect_url"),
+                "location_uncertain": True,
             }
             for j in results
+            if _company_name_matches(company, str((j.get("company") or {}).get("display_name") or ""))
         ]
+        if results and not jobs:
+            return ToolResult(ok=False, reason="Adzuna results did not verify the target employer")
         return ToolResult(ok=True, data={"jobs": jobs})
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
@@ -443,6 +650,7 @@ def extract_emails(url: str) -> ToolResult:
         emails.sort(key=lambda e: (not RECRUITMENT_EMAIL.match(e), e))
         text = trafilatura.extract(resp.text) or resp.text
         return ToolResult(ok=True, data={
+            "url": str(resp.url),
             "emails": emails[:5],
             "recruitment": [e for e in emails[:5] if RECRUITMENT_EMAIL.match(e)],
             "hiring_signal": bool(HIRING_INVITATION.search(text)),

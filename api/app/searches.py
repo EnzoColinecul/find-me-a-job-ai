@@ -12,6 +12,7 @@ capacity and no infra change. It deliberately stores only descriptive fields (ro
 location, radius) and NOT status — status lives on META and would go stale here,
 and the rail links straight through to the search page, which polls it live.
 """
+import hashlib
 import json
 import logging
 import uuid
@@ -155,6 +156,20 @@ def _consume_free_search(sub: str) -> None:
         raise
 
 
+def _refund_free_search(sub: str) -> None:
+    """Compensate the personal quota when no workflow was handed off."""
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
+            UpdateExpression="SET free_search_used = :f",
+            ConditionExpression="free_search_used = :t",
+            ExpressionAttributeValues={":f": False, ":t": True},
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            logger.warning("could not refund free search for %s: %s", sub, exc)
+
+
 def _month_key(when: datetime | None = None) -> str:
     return (when or datetime.now(timezone.utc)).strftime("%Y-%m")
 
@@ -276,19 +291,20 @@ def _acquire_search_lease(sub: str, search_id: str) -> None:
         raise
 
 
-def _release_search_lease(sub: str) -> None:
+def _release_search_lease(sub: str, search_id: str) -> None:
     """Free the concurrency slot early, rather than waiting for the lease out."""
     try:
         _get_table().update_item(
             Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
             UpdateExpression="SET active_since = :none, active_search_id = :none",
-            ExpressionAttributeValues={":none": ""},
+            ConditionExpression="active_search_id = :sid",
+            ExpressionAttributeValues={":none": "", ":sid": search_id},
         )
     except ClientError as exc:
         logger.warning("could not release search lease for %s: %s", sub, exc)
 
 
-def create_search(sub: str, req: SearchRequest) -> dict:
+def create_search(sub: str, req: SearchRequest, idempotency_key: str | None = None) -> dict:
     """Consume quota, persist the search, kick the pipeline. Returns the META item.
 
     Three gates, cheapest and most-reversible first, so a rejection never eats
@@ -297,19 +313,33 @@ def create_search(sub: str, req: SearchRequest) -> dict:
       2. this month's global cap — protects the free tiers
       3. this user's free search — the only irreversible one
     """
+    if idempotency_key:
+        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        existing = _get_table().get_item(
+            Key={"PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{key_hash}"}
+        ).get("Item")
+        if existing:
+            prior = _get_table().get_item(
+                Key={"PK": f"SEARCH#{existing['search_id']}", "SK": "META"}
+            ).get("Item")
+            if prior and prior.get("user_sub") == sub:
+                return prior
+    else:
+        key_hash = ""
+
     search_id = uuid.uuid4().hex[:12]
 
     _acquire_search_lease(sub, search_id)
     try:
         month = _reserve_monthly_slot()
     except Exception:
-        _release_search_lease(sub)
+        _release_search_lease(sub, search_id)
         raise
     try:
         _consume_free_search(sub)
     except Exception:
         _release_monthly_slot(month)
-        _release_search_lease(sub)
+        _release_search_lease(sub, search_id)
         raise
 
     # The start of the search's Langfuse trace. Pipeline Lambdas join the same
@@ -332,12 +362,30 @@ def create_search(sub: str, req: SearchRequest) -> dict:
                   *[f"role:{r}" for r in labels[:3]]],
             input={"roles": labels, "radius_km": req.radius_km},
         ) as obs:
-            meta = _persist_and_start(sub, req, search_id)
+            meta = _persist_and_start(sub, req, search_id, key_hash)
             obs.update(output={"status": meta["status"],
                                "pipeline_started": bool(meta.get("execution_arn"))})
             if not meta.get("execution_arn"):
                 obs.update(level="WARNING", status_message="pipeline not started")
             return meta
+    except Exception:
+        _refund_free_search(sub)
+        _release_monthly_slot(month)
+        _release_search_lease(sub, search_id)
+        try:
+            _get_table().update_item(
+                Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
+                UpdateExpression="SET #s = :failed, failed_at = :t",
+                ConditionExpression="#s IN (:pending, :running)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":failed": "failed", ":t": datetime.now(timezone.utc).isoformat(),
+                    ":pending": "pending", ":running": "running",
+                },
+            )
+        except Exception:
+            logger.exception("could not mark failed creation %s", search_id)
+        raise
     finally:
         # API Lambdas freeze between requests too; short wait, never blocking.
         observability.flush(timeout=1.0)
@@ -349,7 +397,8 @@ def _trace_id(search_id: str) -> str:
     return trace_id_for(search_id)
 
 
-def _persist_and_start(sub: str, req: SearchRequest, search_id: str) -> dict:
+def _persist_and_start(sub: str, req: SearchRequest, search_id: str,
+                       idempotency_hash: str = "") -> dict:
     now = datetime.now(timezone.utc).isoformat()
     meta = {
         "PK": f"SEARCH#{search_id}",
@@ -387,6 +436,14 @@ def _persist_and_start(sub: str, req: SearchRequest, search_id: str) -> dict:
         }
     )
 
+    if idempotency_hash:
+        _get_table().put_item(
+            Item={"PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{idempotency_hash}",
+                  "search_id": search_id,
+                  "expires_at": int(datetime.now(timezone.utc).timestamp()) + 7 * 24 * 3600},
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+
     if settings.state_machine_arn:
         try:
             execution = _get_sfn().start_execution(
@@ -412,9 +469,8 @@ def _persist_and_start(sub: str, req: SearchRequest, search_id: str) -> dict:
             )
             meta["execution_arn"] = execution["executionArn"]
         except ClientError as exc:
-            # Pipeline not deployed / bad ARN: don't fail the request. The search
-            # record exists and stays "pending" — visible in the UI and logs.
             logger.error("failed to start pipeline for %s: %s", search_id, exc)
+            raise RuntimeError("could not start the search workflow") from exc
     else:
         logger.warning("FMAJ_STATE_MACHINE_ARN not set — search %s stays pending",
                        search_id)
@@ -447,6 +503,10 @@ class NotStoppable(Exception):
     """The search isn't running any more, so there is nothing to stop."""
 
 
+class StopFailed(Exception):
+    """The workflow could not be stopped; status remains unchanged."""
+
+
 def stop_search(sub: str, search_id: str) -> dict | None:
     """Halt a running search: stop the execution, then mark it `cancelled`.
 
@@ -465,28 +525,39 @@ def stop_search(sub: str, search_id: str) -> dict | None:
 
     arn = meta.get("execution_arn")
     if arn:
+        # Do not claim success if Step Functions could not stop the execution.
+        # A concurrently finished execution is resolved by the conditional state
+        # transition below, which reports its actual terminal state.
         try:
             _get_sfn().stop_execution(
                 executionArn=arn, cause="Stopped by the user", error="UserStopped"
             )
         except ClientError as exc:
-            # Already finished, or the pipeline isn't deployed. The user asked
-            # for it to stop; record that rather than leaving it "running"
-            # forever, but don't claim we halted something we didn't.
-            logger.warning("stop_execution failed for %s: %s", search_id, exc)
+            raise StopFailed from exc
 
-    _get_table().update_item(
-        Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-        UpdateExpression="SET #s = :s, cancelled_at = :t",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={
-            ":s": "cancelled",
-            ":t": datetime.now(timezone.utc).isoformat(),
-        },
-    )
+    try:
+        _get_table().update_item(
+            Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
+            UpdateExpression="SET #s = :s, cancelled_at = :t",
+            ConditionExpression="#s IN (:pending, :running)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s": "cancelled",
+                ":t": datetime.now(timezone.utc).isoformat(),
+                ":pending": "pending",
+                ":running": "running",
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            latest = _get_table().get_item(
+                Key={"PK": f"SEARCH#{search_id}", "SK": "META"}
+            ).get("Item") or {}
+            raise NotStoppable(latest.get("status", "unknown")) from exc
+        raise
     # Stopping is the user telling us they're done with this one; making them
     # wait out the lease before they can start another would be perverse.
-    _release_search_lease(sub)
+    _release_search_lease(sub, search_id)
     return {"search_id": search_id, "status": "cancelled"}
 
 
@@ -557,6 +628,7 @@ def get_search(sub: str, search_id: str) -> dict | None:
     return {
         "search_id": search_id,
         "status": meta["status"],
+        "company_errors": int(meta.get("company_errors", 0) or 0),
         "progress": {"done": done, "total": total_companies},
         "steps": [
             {

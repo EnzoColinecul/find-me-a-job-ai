@@ -24,35 +24,20 @@ import sys
 import time
 from pathlib import Path
 
-import httpx
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from fmaj_agent.models import Company  # noqa: E402
 from fmaj_agent.orchestrator import investigate  # noqa: E402
+from fmaj_agent.tools.impl import check_link_status  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "golden.yaml"
 
 
-# Bot-protection responses: the URL is real and a human browser opens it fine, we're
-# just being blocked. Counting these as "dead" produced false negatives (verified
-# manually with Bourke Street Bakery's careers page).
-_BLOCKED_NOT_DEAD = {401, 403, 405, 406, 409, 429, 503}
-
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-
-
-def link_alive(url: str) -> bool:
-    headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
-    try:
-        r = httpx.head(url, timeout=10, follow_redirects=True, headers=headers)
-        if r.status_code >= 400:  # some sites don't implement HEAD properly
-            r = httpx.get(url, timeout=10, follow_redirects=True, headers=headers)
-        return r.status_code < 400 or r.status_code in _BLOCKED_NOT_DEAD
-    except Exception:
-        return False
+def link_alive(url: str) -> bool | None:
+    """None means blocked/unknown; never switch access methods to force a result."""
+    return check_link_status(url)
 
 
 def main() -> None:
@@ -76,7 +61,7 @@ def main() -> None:
         print("No cases matched.")
         return
 
-    rows, correct, links_total, links_alive = [], 0, 0, 0
+    rows, correct, links_total, links_alive, links_unknown = [], 0, 0, 0, 0
     errors = 0
     tokens_in = tokens_out = 0
     t0 = time.monotonic()
@@ -89,6 +74,7 @@ def main() -> None:
             website=case.get("website"),
             types=case.get("types", []),
             roles=case["roles"],
+            country_code=case.get("country_code"),
         )
         if i > 1 and args.pause:
             time.sleep(args.pause)
@@ -109,9 +95,11 @@ def main() -> None:
         alive_str = "-"
         if run.findings.links and not args.no_liveness:
             alive = [link_alive(u) for u in run.findings.links]
-            links_total += len(alive)
-            links_alive += sum(alive)
-            alive_str = f"{sum(alive)}/{len(alive)}"
+            known = [v for v in alive if v is not None]
+            links_total += len(known)
+            links_alive += sum(known)
+            links_unknown += len(alive) - len(known)
+            alive_str = f"{sum(known)}/{len(known)}" + (f" ({len(alive)-len(known)} unknown)" if len(alive) != len(known) else "")
 
         rows.append({
             "case": case["name"], "expected": "|".join(case["accept"]), "got": got,
@@ -135,6 +123,7 @@ def main() -> None:
         "type_accuracy": round(accuracy, 2),
         "links_alive": f"{links_alive}/{links_total}" if links_total else "n/a",
         "link_liveness": round(liveness, 2) if liveness is not None else None,
+        "links_unknown": links_unknown,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "total_seconds": round(time.monotonic() - t0, 1),

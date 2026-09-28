@@ -324,6 +324,6 @@ def observed_titles(name: str, result: ToolResult | None) -> list[str]:
         return list(data.get("job_titles") or [])
     if name == "search_jobs_adzuna":
         return [str(j.get("title") or "") for j in (data.get("jobs") or [])]
-    if name == "web_search":
-        return [str(r.get("title") or "") for r in (data.get("results") or [])]
+    if name == "fetch_url":
+        return [str(v.get("title") or "") for v in (data.get("vacancies") or [])]
     return []

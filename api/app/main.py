@@ -1,10 +1,11 @@
 import logging
+import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger("fmaj")
 
@@ -21,7 +22,7 @@ from app.searches import (
     stop_search,
 )
 from app.settings import settings
-from app.users import ensure_user
+from app.users import ensure_user, reserve_interpretation
 
 app = FastAPI(title="Find-Me-A-Job AI API", version="0.1.0")
 
@@ -38,6 +39,7 @@ def api_error(status: int, code: str, message: str) -> HTTPException:
         status_code=status, detail={"code": code, "message": message}
     )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins.split(","),
@@ -46,7 +48,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Return JSON 500s through the middleware stack so CORS headers are applied.
@@ -54,7 +55,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Without this, unhandled exceptions bypass CORSMiddleware and the browser reports
     an opaque 'Failed to fetch' instead of the real error.
     """
-    logger.exception("Unhandled error on %s %s: %s", request.method, request.url.path, exc)
+    request_id = uuid.uuid4().hex
+    logger.exception("Unhandled error request_id=%s on %s %s: %s",
+                     request_id, request.method, request.url.path, exc)
+    headers = {}
+    headers["X-Request-ID"] = request_id
+    origin = request.headers.get("origin")
+    if origin and origin in settings.cors_origins.split(","):
+        headers.update({
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        })
     return JSONResponse(
         status_code=500,
         content={
@@ -64,8 +76,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
                 # find the log line, and messages can carry table names, ARNs or
                 # user data we don't want in a browser.
                 "message": f"Something went wrong on our side ({type(exc).__name__}).",
+                "request_id": request_id,
             }
         },
+        headers=headers,
     )
 
 
@@ -86,17 +100,22 @@ def get_config() -> dict:
 
 
 class InterpretRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=settings.max_interpret_chars)
 
 
 @app.post("/roles/interpret")
-def interpret(req: InterpretRequest, user: AuthUser = Depends(require_user)) -> dict:
+def interpret(req: InterpretRequest, request: Request, user: AuthUser = Depends(require_user)) -> dict:
     """Turn the user's free-text description into role suggestions to confirm.
 
     Does NOT consume the free-search quota — users can rephrase as often as they like.
     """
     from fmaj_agent import observability
     from fmaj_agent.interpret import interpret_roles
+
+    client_ip = request.client.host if request.client else None
+    if not reserve_interpretation(user.sub, client_ip):
+        raise api_error(429, "interpret_rate_limited",
+                        "Too many role suggestions. Wait a minute and try again.")
 
     try:
         result = interpret_roles(req.text)
@@ -123,9 +142,16 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
 
 
 @app.post("/searches", status_code=201)
-def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> dict:
+def post_search(
+    req: SearchRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    user: AuthUser = Depends(require_user),
+) -> dict:
     try:
-        meta = create_search(user.sub, req)
+        if idempotency_key is not None and len(idempotency_key.strip()) < 8:
+            raise api_error(422, "invalid_idempotency_key",
+                            "Idempotency-Key must contain at least 8 characters.")
+        meta = create_search(user.sub, req, idempotency_key=idempotency_key)
     except SearchInProgress:
         # 409, not 429: nothing is being rate-limited, they simply already have
         # one running and the honest fix is to wait for it or stop it.

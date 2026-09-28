@@ -6,6 +6,7 @@ State machine (PipelineStack):
 Each handler writes to DynamoDB incrementally so the frontend's polling endpoint
 (GET /searches/{id}) can stream progress. Handlers are also runnable locally.
 """
+import json
 import logging
 import os
 import time
@@ -47,6 +48,11 @@ def _get_table():
     if _table is None:
         _table = boto3.resource("dynamodb", region_name=AWS_REGION).Table(TABLE_NAME)
     return _table
+
+
+def _search_cancelled(search_id: str) -> bool:
+    item = _get_table().get_item(Key={"PK": f"SEARCH#{search_id}", "SK": "META"}).get("Item") or {}
+    return item.get("status") == "cancelled"
 
 
 def _now() -> str:
@@ -104,12 +110,16 @@ def discover_handler(event: dict, _context=None) -> dict:
 
     Output: {search_id, companies: [company dicts]} consumed by the Map state.
     """
+    if _search_cancelled(event["search_id"]):
+        return {"search_id": event["search_id"], "companies": []}
     try:
         with observability.observe(
             "discovery", metadata={"radius_km": event.get("radius_km")},
             **_search_trace(event["search_id"], list(event.get("roles") or [])),
         ) as obs:
             out = _discover(event)
+            if _search_cancelled(event["search_id"]):
+                return {"search_id": event["search_id"], "companies": []}
             companies = out["companies"]
             countries: dict[str, int] = {}
             for c in companies:
@@ -127,8 +137,10 @@ def _discover(event: dict) -> dict:
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET #s = :s, discovery_started_at = :t",
+        ConditionExpression="#s IN (:pending, :running)",
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "running", ":t": _now()},
+        ExpressionAttributeValues={":s": "running", ":t": _now(),
+                                   ":pending": "pending", ":running": "running"},
     )
 
     result = discover(
@@ -186,6 +198,9 @@ def investigate_handler(event: dict, _context=None) -> dict:
     """Input (one Map item): {search_id, company: {...}}. Writes the RESULT# item."""
     search_id = event["search_id"]
     company = Company(**event["company"])
+    if _search_cancelled(search_id):
+        return {"place_id": company.place_id, "opportunity_type": "pending",
+                "outcome": "cancelled", "error_code": ""}
     # Steps are written as they happen, so the panel fills in while the Map
     # state is still running rather than all at once at the end.
     #
@@ -195,14 +210,18 @@ def investigate_handler(event: dict, _context=None) -> dict:
     try:
         run = investigate(
             company,
-            on_step=lambda s: _put_step(search_id, s),
+            on_step=lambda s: None if _search_cancelled(search_id) else _put_step(search_id, s),
             budget=DynamoSearchBudget(search_id, table=_get_table()),
             search_id=search_id,
+            should_stop=lambda: _search_cancelled(search_id),
         )
     finally:
         # The Lambda freezes on return; hand the spans over first (bounded).
         observability.flush()
     f = run.findings
+    if run.cancelled or _search_cancelled(search_id):
+        return {"place_id": company.place_id, "opportunity_type": "pending",
+                "outcome": "cancelled", "error_code": ""}
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
         UpdateExpression=("SET opportunity_type = :o, links = :l, emails = :e, "
@@ -222,13 +241,17 @@ def investigate_handler(event: dict, _context=None) -> dict:
                 search_id, company.name, f.opportunity_type.value,
                 run.tool_calls, run.metered_calls.get("web_search", 0),
                 run.input_tokens, run.output_tokens)
-    return {"place_id": company.place_id, "opportunity_type": f.opportunity_type.value}
+    return {"place_id": company.place_id, "opportunity_type": f.opportunity_type.value,
+            "outcome": "error" if run.error else "success",
+            "error_code": run.error.split(":", 1)[0] if run.error else ""}
 
 
 def aggregate_handler(event: dict, _context=None) -> dict:
     """Input: {search_id, results: [investigate outputs]}. Finalizes the search."""
     search_id = event["search_id"]
     results = event.get("results", [])
+    if _search_cancelled(search_id):
+        return {"search_id": search_id, "status": "cancelled", "counts": {}}
     counts: dict[str, int] = {}
     for r in results:
         counts[r["opportunity_type"]] = counts.get(r["opportunity_type"], 0) + 1
@@ -238,26 +261,51 @@ def aggregate_handler(event: dict, _context=None) -> dict:
                                "counts": counts})
     finally:
         observability.flush()
+    failures = [r for r in results if r.get("outcome") == "error"]
+    final_status = "failed" if failures and len(failures) == len(results) else (
+        "degraded" if failures else "completed"
+    )
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-        UpdateExpression="SET #s = :s, completed_at = :t, opportunity_counts = :c",
+        UpdateExpression="SET #s = :s, completed_at = :t, opportunity_counts = :c, "
+                         "company_errors = :e",
+        ConditionExpression="#s IN (:pending, :running)",
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "completed", ":t": _now(), ":c": counts},
+        ExpressionAttributeValues={":s": final_status, ":t": _now(), ":c": counts,
+                                   ":e": len(failures), ":pending": "pending", ":running": "running"},
     )
-    logger.info("search %s completed: %s", search_id, counts)
-    return {"search_id": search_id, "counts": counts}
+    logger.info("search %s %s: %s (%d company errors)", search_id, final_status,
+                counts, len(failures))
+    return {"search_id": search_id, "counts": counts, "status": final_status,
+            "company_errors": len(failures)}
 
 
 def fail_handler(event: dict, _context=None) -> dict:
     """Catch-all: mark the search failed (wired to state machine error catch)."""
     search_id = event.get("search_id") or (event.get("input") or {}).get("search_id", "")
+    if not search_id:
+        detail = event.get("detail") or {}
+        execution_input = detail.get("input")
+        if isinstance(execution_input, str):
+            try:
+                execution_input = json.loads(execution_input)
+            except ValueError:
+                execution_input = {}
+        if isinstance(execution_input, dict):
+            search_id = execution_input.get("search_id", "")
     if search_id:
-        _get_table().update_item(
-            Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-            UpdateExpression="SET #s = :s, failed_at = :t",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "failed", ":t": _now()},
-        )
+        try:
+            _get_table().update_item(
+                Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
+                UpdateExpression="SET #s = :s, failed_at = :t",
+                ConditionExpression="#s IN (:pending, :running)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "failed", ":t": _now(),
+                                           ":pending": "pending", ":running": "running"},
+            )
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
     logger.error("search %s failed: %s", search_id, event.get("error"))
     if search_id:
         # Only the error *type* from Step Functions: its Cause can carry a stack
