@@ -1,6 +1,7 @@
 """Outbound URL policy rejects local addresses and unsafe redirect hops."""
 import socket
 
+import httpcore
 import httpx
 import pytest
 import respx
@@ -36,11 +37,27 @@ def test_redirect_to_loopback_is_rejected(monkeypatch) -> None:
         socket, "getaddrinfo",
         lambda *_a, **_kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))],
     )
+    monkeypatch.setattr(
+        impl, "_send_pinned_request",
+        lambda method, url, _addresses, timeout: getattr(httpx, method.lower())(
+            url, headers={"User-Agent": impl.USER_AGENT}, timeout=timeout,
+            follow_redirects=False,
+        ),
+    )
     respx.get("https://public.example/").mock(
         return_value=httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"})
     )
     with pytest.raises(ValueError, match="private"):
         impl._request_public("https://public.example/")
+
+
+def test_pinned_backend_connects_to_the_validated_address(monkeypatch) -> None:
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp",
+                        lambda _self, host, *_a, **_kw: host)
+    backend = impl._PinnedBackend("public.example", ["8.8.8.8"])
+    assert backend.connect_tcp("public.example", 443) == "8.8.8.8"
+    with pytest.raises(ValueError, match="host changed"):
+        backend.connect_tcp("other.example", 443)
 
 
 def test_job_board_listing_bodies_are_blocked() -> None:

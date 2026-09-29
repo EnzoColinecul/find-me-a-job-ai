@@ -7,13 +7,14 @@ exception is `find_seek_company_page`, which reads the vacancy *titles* off one
 robots-allowed employer page to check they match the role; see its docstring.
 """
 
+import ipaddress
 import json
 import re
-import ipaddress
 import socket
 import time
 from urllib.parse import urljoin, urlparse
 
+import httpcore
 import httpx
 import trafilatura
 from bs4 import BeautifulSoup
@@ -79,26 +80,85 @@ MAX_REDIRECTS = 5
 BOARD_HOSTS = ("seek.com", "seek.co.nz", "linkedin.com", "indeed.com", "adzuna.com", "jora.com", "glassdoor.com")
 
 
+def _public_addresses(url: str) -> list[str]:
+    """Resolve once and return only addresses suitable for the actual socket."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("only public http/https URLs are allowed")
+    if parsed.username or parsed.password or parsed.port not in (None, 80, 443):
+        raise ValueError("URL credentials or non-standard ports are not allowed")
+    host = parsed.hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        raise ValueError("private network destinations are not allowed")
+    try:
+        resolved = [ipaddress.ip_address(host)]
+    except ValueError:
+        resolved = [
+            ipaddress.ip_address(row[4][0])
+            for row in socket.getaddrinfo(
+                host,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+        ]
+    if not resolved or any(not address.is_global for address in resolved):
+        raise ValueError("private, loopback, and link-local destinations are not allowed")
+    return [str(address) for address in dict.fromkeys(resolved)]
+
+
 def _safe_destination(url: str) -> tuple[bool, str]:
     """Reject non-web URLs and destinations that resolve to non-public IP space."""
     try:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return False, "only public http/https URLs are allowed"
-        if parsed.username or parsed.password or parsed.port not in (None, 80, 443):
-            return False, "URL credentials or non-standard ports are not allowed"
-        host = parsed.hostname.rstrip(".").lower()
-        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-            return False, "private network destinations are not allowed"
-        try:
-            addresses = {ipaddress.ip_address(host)}
-        except ValueError:
-            addresses = {ipaddress.ip_address(row[4][0]) for row in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
-        if not addresses or any(not ip.is_global for ip in addresses):
-            return False, "private, loopback, and link-local destinations are not allowed"
+        _public_addresses(url)
         return True, ""
-    except Exception:
+    except (ValueError, OSError):
         return False, "could not validate destination"
+
+
+class _PinnedBackend(httpcore.SyncBackend):
+    """Connect to validated IPs while TLS still uses the requested hostname."""
+
+    def __init__(self, hostname: str, addresses: list[str]) -> None:
+        self.hostname = hostname.encode("idna").decode("ascii").lower().rstrip(".")
+        self.addresses = addresses
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        normalized = host.encode("idna").decode("ascii").lower().rstrip(".")
+        if normalized != self.hostname:
+            raise ValueError("connection host changed after destination validation")
+        last_error = None
+        for address in self.addresses:
+            try:
+                return super().connect_tcp(
+                    address, port, timeout=timeout, local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except httpcore.NetworkError as exc:  # try the other validated public address
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise OSError("no validated public address available")
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    def __init__(self, hostname: str, addresses: list[str]) -> None:
+        super().__init__(trust_env=False)
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=httpx.create_ssl_context(trust_env=False),
+            network_backend=_PinnedBackend(hostname, addresses),
+            retries=0,
+        )
+
+
+def _send_pinned_request(method: str, url: str, addresses: list[str], timeout: float) -> httpx.Response:
+    hostname = urlparse(url).hostname or ""
+    with httpx.Client(
+        transport=_PinnedTransport(hostname, addresses),
+        headers={"User-Agent": USER_AGENT},
+        timeout=timeout,
+        follow_redirects=False,
+    ) as client:
+        return client.request(method, url)
 
 
 def _board_listing_url(url: str) -> bool:
@@ -124,14 +184,12 @@ def _request_public(url: str, *, purpose: str = "page", timeout: float = TIMEOUT
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("outbound request deadline exceeded")
-        safe, reason = _safe_destination(current)
-        if not safe:
-            raise ValueError(reason)
+        addresses = _public_addresses(current)
         if purpose == "page" and _board_listing_url(current):
             raise ValueError("fetching job-board listing pages is not permitted")
         if purpose == "page" and current != initial and not _allowed(current):
             raise ValueError("redirect destination is disallowed by robots.txt")
-        response = httpx.get(current, headers={"User-Agent": USER_AGENT}, timeout=remaining, follow_redirects=False)
+        response = _send_pinned_request("GET", current, addresses, remaining)
         if response.status_code not in {301, 302, 303, 307, 308}:
             return response
         location = response.headers.get("location")
@@ -283,11 +341,10 @@ def check_link_status(url: str) -> bool | None:
     current = url
     try:
         for _ in range(MAX_REDIRECTS + 1):
-            safe, _ = _safe_destination(current)
-            if not safe or _board_listing_url(current) or not _allowed(current):
+            if _board_listing_url(current) or not _allowed(current):
                 return None
-            response = httpx.head(current, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT,
-                                  follow_redirects=False)
+            addresses = _public_addresses(current)
+            response = _send_pinned_request("HEAD", current, addresses, TIMEOUT)
             if response.status_code in {301, 302, 303, 307, 308}:
                 location = response.headers.get("location")
                 if not location:

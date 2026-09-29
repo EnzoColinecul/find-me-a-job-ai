@@ -10,6 +10,15 @@ from fmaj_agent.tools import impl
 def _allow_mocked_test_hosts(monkeypatch):
     """All HTTP destinations here are intercepted by respx; DNS is synthetic."""
     monkeypatch.setattr(impl, "_safe_destination", lambda _url: (True, ""))
+    monkeypatch.setattr(impl, "_public_addresses", lambda _url: ["8.8.8.8"])
+    monkeypatch.setattr(
+        impl,
+        "_send_pinned_request",
+        lambda method, url, _addresses, timeout: getattr(httpx, method.lower())(
+            url, headers={"User-Agent": impl.USER_AGENT}, timeout=timeout,
+            follow_redirects=False,
+        ),
+    )
 
 
 @respx.mock
