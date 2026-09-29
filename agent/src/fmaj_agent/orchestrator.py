@@ -678,6 +678,14 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                                     "output": {"ok": False, "reason": denial}})
                     continue
 
+                # A stop may arrive while reserving the shared paid-tool cap.
+                # Check again immediately before dispatch so no external call
+                # starts after cancellation is visible.
+                if _stopped():
+                    run.cancelled = True
+                    run.seconds = time.monotonic() - start
+                    return run
+
                 with observability.observe(
                     f"tool.{tu.name}", as_type="tool",
                     input=observability.tool_input_summary(tu.input),

@@ -9,10 +9,14 @@ Each handler writes to DynamoDB incrementally so the frontend's polling endpoint
 import json
 import logging
 import os
+import random
 import time
+import uuid
 from datetime import datetime, timezone
 
 import boto3
+from boto3.dynamodb.types import TypeSerializer
+from botocore.exceptions import ClientError
 
 from fmaj_agent import config, observability
 from fmaj_agent.budget import DynamoSearchBudget
@@ -41,6 +45,7 @@ STEP_TTL_SECONDS = 7 * 24 * 3600
 PIN_TTL_SECONDS = 7 * 24 * 3600
 
 _table = None
+_serializer = TypeSerializer()
 
 
 def _get_table():
@@ -50,9 +55,63 @@ def _get_table():
     return _table
 
 
-def _search_cancelled(search_id: str) -> bool:
+def _search_status(search_id: str) -> str:
     item = _get_table().get_item(Key={"PK": f"SEARCH#{search_id}", "SK": "META"}).get("Item") or {}
-    return item.get("status") == "cancelled"
+    return str(item.get("status", "unknown"))
+
+
+def _search_cancelled(search_id: str) -> bool:
+    return _search_status(search_id) == "cancelled"
+
+
+def _search_stopped(search_id: str) -> bool:
+    return _search_status(search_id) not in {"pending", "running"}
+
+
+def _av(values: dict) -> dict:
+    return {key: _serializer.serialize(value) for key, value in values.items()}
+
+
+def _write_while_running(search_id: str, actions: list[dict]) -> None:
+    """Commit row changes only while META is running, atomically with cancel.
+
+    Step Functions cannot stop a Lambda already in flight. Conditioning these
+    writes on the META row makes stop and a result commit a serialized choice:
+    whichever transaction wins happens first, and no later result can mutate a
+    cancelled/terminal search.
+    """
+    table = _get_table()
+    check = {"ConditionCheck": {
+        "TableName": table.name,
+        "Key": _av({"PK": f"SEARCH#{search_id}", "SK": "META"}),
+        "ConditionExpression": "#s = :running",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": _av({":running": "running"}),
+    }}
+    request = {
+        "TransactItems": [check, *actions],
+        "ClientRequestToken": uuid.uuid4().hex,
+    }
+    for attempt in range(3):
+        try:
+            table.meta.client.transact_write_items(**request)
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            transient = code in {
+                "TransactionConflictException",
+                "ProvisionedThroughputExceededException",
+                "ThrottlingException",
+            }
+            if not transient or attempt == 2:
+                raise
+            time.sleep(0.05 * (2**attempt) + random.random() * 0.05)
+
+
+def _put_while_running(search_id: str, item: dict) -> None:
+    table = _get_table()
+    action = {"Put": {"TableName": table.name, "Item": _av(item)}}
+    _write_while_running(search_id, [action])
 
 
 def _now() -> str:
@@ -77,7 +136,7 @@ def _put_step(search_id: str, step: TraceStep) -> None:
     directly, so the guarantee belongs here too.
     """
     try:
-        _get_table().put_item(Item={
+        _put_while_running(search_id, {
             "PK": f"SEARCH#{search_id}",
             "SK": f"STEP#{step.at}#{step.place_id or 'x'}",
             **step.to_item(),
@@ -110,15 +169,22 @@ def discover_handler(event: dict, _context=None) -> dict:
 
     Output: {search_id, companies: [company dicts]} consumed by the Map state.
     """
-    if _search_cancelled(event["search_id"]):
+    if _search_stopped(event["search_id"]):
         return {"search_id": event["search_id"], "companies": []}
     try:
         with observability.observe(
             "discovery", metadata={"radius_km": event.get("radius_km")},
             **_search_trace(event["search_id"], list(event.get("roles") or [])),
         ) as obs:
-            out = _discover(event)
-            if _search_cancelled(event["search_id"]):
+            try:
+                out = _discover(event)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in {"TransactionCanceledException", "ConditionalCheckFailedException"} \
+                        and _search_stopped(event["search_id"]):
+                    return {"search_id": event["search_id"], "companies": []}
+                raise
+            if _search_stopped(event["search_id"]):
                 return {"search_id": event["search_id"], "companies": []}
             companies = out["companies"]
             countries: dict[str, int] = {}
@@ -150,7 +216,7 @@ def _discover(event: dict) -> dict:
         roles=list(event["roles"]),  # RoleSpec dicts (or legacy plain strings)
     )
     for company in result.companies:
-        table.put_item(Item={
+        company_item = {
             "PK": f"SEARCH#{search_id}",
             "SK": f"RESULT#{company.place_id}",
             "company": company.name,
@@ -159,24 +225,30 @@ def _discover(event: dict) -> dict:
             "opportunity_type": "pending",
             "links": [],
             "emails": [],
-        })
+        }
+        actions = [{"Put": {"TableName": table.name, "Item": _av(company_item)}}]
         # Coordinates go on a separate, expiring PIN# item — see PIN_TTL_SECONDS.
         # Stored as strings to match the META lat/lng and avoid DynamoDB's
         # float/Decimal handling; get_search parses them back. A company with no
         # coordinates simply gets no pin.
         if company.lat is not None and company.lng is not None:
-            table.put_item(Item={
+            pin_item = {
                 "PK": f"SEARCH#{search_id}",
                 "SK": f"PIN#{company.place_id}",
                 "lat": str(company.lat),
                 "lng": str(company.lng),
                 "expires_at": int(time.time()) + PIN_TTL_SECONDS,
-            })
+            }
+            actions.append({"Put": {"TableName": table.name, "Item": _av(pin_item)}})
+        _write_while_running(search_id, actions)
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET company_count = :c, discovery_stats = :st",
+        ConditionExpression="#s = :running",
+        ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":c": len(result.companies),
-                                   ":st": {k: str(v) for k, v in result.stats.items()}},
+                                   ":st": {k: str(v) for k, v in result.stats.items()},
+                                   ":running": "running"},
     )
     logger.info("search %s budgets: %s", search_id, config.budget_summary())
     n = len(result.companies)
@@ -198,9 +270,10 @@ def investigate_handler(event: dict, _context=None) -> dict:
     """Input (one Map item): {search_id, company: {...}}. Writes the RESULT# item."""
     search_id = event["search_id"]
     company = Company(**event["company"])
-    if _search_cancelled(search_id):
+    if _search_stopped(search_id):
+        outcome = "cancelled" if _search_cancelled(search_id) else "terminal"
         return {"place_id": company.place_id, "opportunity_type": "pending",
-                "outcome": "cancelled", "error_code": ""}
+                "outcome": outcome, "error_code": ""}
     # Steps are written as they happen, so the panel fills in while the Map
     # state is still running rather than all at once at the end.
     #
@@ -210,24 +283,27 @@ def investigate_handler(event: dict, _context=None) -> dict:
     try:
         run = investigate(
             company,
-            on_step=lambda s: None if _search_cancelled(search_id) else _put_step(search_id, s),
+            on_step=lambda s: None if _search_stopped(search_id) else _put_step(search_id, s),
             budget=DynamoSearchBudget(search_id, table=_get_table()),
             search_id=search_id,
-            should_stop=lambda: _search_cancelled(search_id),
+            should_stop=lambda: _search_stopped(search_id),
         )
     finally:
         # The Lambda freezes on return; hand the spans over first (bounded).
         observability.flush()
     f = run.findings
-    if run.cancelled or _search_cancelled(search_id):
+    if run.cancelled or _search_stopped(search_id):
+        outcome = "cancelled" if _search_cancelled(search_id) else "terminal"
         return {"place_id": company.place_id, "opportunity_type": "pending",
-                "outcome": "cancelled", "error_code": ""}
-    _get_table().update_item(
-        Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
-        UpdateExpression=("SET opportunity_type = :o, links = :l, emails = :e, "
-                          "evidence = :v, confidence = :c, agent_stats = :st, "
-                          "investigated_at = :t"),
-        ExpressionAttributeValues={
+                "outcome": outcome, "error_code": ""}
+    table = _get_table()
+    result_update = {"Update": {
+        "TableName": table.name,
+        "Key": _av({"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"}),
+        "UpdateExpression": ("SET opportunity_type = :o, links = :l, emails = :e, "
+                             "evidence = :v, confidence = :c, agent_stats = :st, "
+                             "investigated_at = :t"),
+        "ExpressionAttributeValues": _av({
             ":o": f.opportunity_type.value,
             ":l": f.links,
             ":e": f.emails,
@@ -235,8 +311,17 @@ def investigate_handler(event: dict, _context=None) -> dict:
             ":c": str(f.confidence),
             ":st": {k: str(v) for k, v in run.stats().items()},
             ":t": _now(),
-        },
-    )
+        }),
+    }}
+    try:
+        _write_while_running(search_id, [result_update])
+    except ClientError as exc:
+        if (exc.response.get("Error", {}).get("Code") == "TransactionCanceledException"
+                and _search_stopped(search_id)):
+            outcome = "cancelled" if _search_cancelled(search_id) else "terminal"
+            return {"place_id": company.place_id, "opportunity_type": "pending",
+                    "outcome": outcome, "error_code": ""}
+        raise
     logger.info("search %s / %s -> %s (tools=%d web_search=%d tokens=%d/%d)",
                 search_id, company.name, f.opportunity_type.value,
                 run.tool_calls, run.metered_calls.get("web_search", 0),
@@ -250,8 +335,8 @@ def aggregate_handler(event: dict, _context=None) -> dict:
     """Input: {search_id, results: [investigate outputs]}. Finalizes the search."""
     search_id = event["search_id"]
     results = event.get("results", [])
-    if _search_cancelled(search_id):
-        return {"search_id": search_id, "status": "cancelled", "counts": {}}
+    if _search_stopped(search_id):
+        return {"search_id": search_id, "status": _search_status(search_id), "counts": {}}
     counts: dict[str, int] = {}
     for r in results:
         counts[r["opportunity_type"]] = counts.get(r["opportunity_type"], 0) + 1
