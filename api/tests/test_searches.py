@@ -1,4 +1,10 @@
+from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from types import SimpleNamespace
+
 import pytest
+from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -11,11 +17,12 @@ class FakeTable:
 
     def __init__(self) -> None:
         self.store: dict = {}
+        self.meta = SimpleNamespace(client=FakeDynamoClient(self))
 
     def put_item(self, Item, ConditionExpression=None):  # noqa: N803
         self.store[(Item["PK"], Item["SK"])] = Item
 
-    def get_item(self, Key):  # noqa: N803
+    def get_item(self, Key, ConsistentRead=False):  # noqa: N803
         item = self.store.get((Key["PK"], Key["SK"]))
         return {"Item": item} if item else {}
 
@@ -129,6 +136,70 @@ class FakeTable:
         return {"Items": items}
 
 
+class FakeDynamoClient:
+    """Small transactional subset used to assert all-or-nothing reservations."""
+
+    def __init__(self, table):
+        self.table = table
+        self.deserialize = TypeDeserializer().deserialize
+        self.lock = Lock()
+
+    def transact_write_items(self, TransactItems, ClientRequestToken=None):  # noqa: N803
+        with self.lock:
+            self._apply_transaction(TransactItems)
+
+    def _apply_transaction(self, TransactItems):
+        staged = deepcopy(self.table.store)
+
+        def reject():
+            raise ClientError(
+                {"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems"
+            )
+
+        for action in TransactItems:
+            if "Update" in action:
+                update = action["Update"]
+                key = {name: self.deserialize(value) for name, value in update["Key"].items()}
+                identity = (key["PK"], key["SK"])
+                item = staged.get(identity)
+                values = {
+                    name: self.deserialize(value)
+                    for name, value in update["ExpressionAttributeValues"].items()
+                }
+                if "free_search_used" in update["ConditionExpression"]:
+                    if item is None or item.get("free_search_used") is not values[":unused"]:
+                        reject()
+                    active_matches = (
+                        ("active_since" not in item and "active_search_id" not in item)
+                        or (item.get("active_since") == values[":expected_since"]
+                            and ("active_search_id" not in item
+                                 or item.get("active_search_id") == values[":expected_id"]))
+                    )
+                    if not active_matches:
+                        reject()
+                    item.update({
+                        "free_search_used": values[":used"],
+                        "active_since": values[":now"],
+                        "active_search_id": values[":sid"],
+                    })
+                else:
+                    count = (item or {}).get("count", 0)
+                    if count >= values[":cap"]:
+                        reject()
+                    if item is None:
+                        item = {**key}
+                        staged[identity] = item
+                    item["count"] = count + values[":one"]
+            else:
+                put = action["Put"]
+                item = {name: self.deserialize(value) for name, value in put["Item"].items()}
+                identity = (item["PK"], item["SK"])
+                if identity in staged:
+                    reject()
+                staged[identity] = item
+        self.table.store = staged
+
+
 @pytest.fixture()
 def table(monkeypatch):
     fake = FakeTable()
@@ -221,26 +292,19 @@ def test_idempotency_key_returns_the_original_search_without_spending_again(tabl
     assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
 
 
-def test_pipeline_start_failure_refunds_quota_month_and_lease(table, monkeypatch) -> None:
+def test_reservation_transaction_persists_all_search_records_together(table) -> None:
     _user(table)
-    monkeypatch.setattr(searches.settings, "state_machine_arn", "arn:state-machine")
-
-    class BrokenStateMachine:
-        def start_execution(self, **_kwargs):
-            raise ClientError({"Error": {"Code": "AccessDeniedException"}}, "StartExecution")
-
-    monkeypatch.setattr(searches, "_get_sfn", lambda: BrokenStateMachine())
-    with pytest.raises(RuntimeError, match="could not start"):
-        searches.create_search("u1", SearchRequest(**VALID))
-
+    meta = searches.create_search("u1", SearchRequest(**VALID), "transaction-key-001")
+    search_id = meta["search_id"]
     profile = table.store[("USER#u1", "PROFILE")]
-    assert profile["free_search_used"] is False
-    assert profile["active_search_id"] == ""
-    month_item = table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]
-    assert month_item["count"] == 0
-    metas = [v for (pk, sk), v in table.store.items()
-             if pk.startswith("SEARCH#") and sk == "META"]
-    assert len(metas) == 1 and metas[0]["status"] == "failed"
+    assert profile["free_search_used"] is True
+    assert profile["active_search_id"] == search_id
+    assert table.store[(f"SEARCH#{search_id}", "META")]["execution_start_state"] == "pending"
+    assert any(pk == "USER#u1" and sk.startswith("SEARCH#")
+               for pk, sk in table.store)
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
+    key_hash = searches.hashlib.sha256(b"transaction-key-001").hexdigest()
+    assert table.store[("USER#u1", f"IDEMPOTENCY#{key_hash}")]["search_id"] == search_id
 
 
 def _finish(table, search_id, status="completed"):
@@ -264,6 +328,30 @@ def test_concurrent_search_rejected_while_first_runs(table) -> None:
     table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
     with pytest.raises(searches.SearchInProgress):
         searches.create_search("u1", SearchRequest(**VALID))
+
+
+def test_simultaneous_reservations_commit_only_one_search(table, monkeypatch) -> None:
+    _user(table)
+    # Model two requests that both read the same empty lease before either
+    # reaches DynamoDB's transaction boundary.
+    monkeypatch.setattr(searches, "_check_search_lease", lambda _sub: ("", ""))
+
+    def create():
+        try:
+            return searches.create_search("u1", SearchRequest(**VALID))
+        except Exception as exc:  # collect the loser for a stable assertion
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: create(), range(2)))
+    successes = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+    errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    assert len(successes) == 1
+    assert len(errors) == 1 and isinstance(errors[0], searches.SearchInProgress)
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
+    metas = [item for (pk, sk), item in table.store.items()
+             if pk.startswith("SEARCH#") and sk == "META"]
+    assert len(metas) == 1
 
 
 def test_lease_frees_as_soon_as_the_search_finishes(table) -> None:
@@ -330,15 +418,17 @@ def test_rejected_search_does_not_eat_the_monthly_slot(table, monkeypatch) -> No
     assert counter is None or counter["count"] == 0
 
 
-def test_rejected_search_releases_the_lease(table, monkeypatch) -> None:
-    """...and doesn't leave them locked out on the way through, either."""
+def test_rejected_search_transaction_does_not_acquire_the_lease(table, monkeypatch) -> None:
+    """A rejected atomic reservation leaves the profile untouched."""
     from app.settings import settings
 
     monkeypatch.setattr(settings, "global_monthly_searches", 5)
     _user(table, used=True)
     with pytest.raises(QuotaExhausted):
         searches.create_search("u1", SearchRequest(**VALID))
-    assert table.store[("USER#u1", "PROFILE")].get("active_since") == ""
+    profile = table.store[("USER#u1", "PROFILE")]
+    assert profile.get("active_since") is None
+    assert profile["free_search_used"] is True
 
 
 def test_monthly_cap_of_zero_is_unlimited(table, monkeypatch) -> None:

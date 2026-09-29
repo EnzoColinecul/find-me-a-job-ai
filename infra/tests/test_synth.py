@@ -14,6 +14,10 @@ def test_stages_synth() -> None:
     assembly = app.synth()
     stacks = {s.stack_name: s for s in assembly.stacks_recursively}
     assert "Fmaj-Test-Pipeline" in stacks and "Fmaj-Prod-Pipeline" in stacks
+    data = stacks["Fmaj-Test-Data"].template["Resources"]
+    tables = [r for r in data.values() if r["Type"] == "AWS::DynamoDB::Table"]
+    assert len(tables) == 1
+    assert tables[0]["Properties"]["StreamSpecification"]["StreamViewType"] == "NEW_IMAGE"
     pipeline = stacks["Fmaj-Test-Pipeline"].template["Resources"]
     types = [r["Type"] for r in pipeline.values()]
     assert "AWS::StepFunctions::StateMachine" in types
@@ -25,6 +29,17 @@ def test_stages_synth() -> None:
     api = stacks["Fmaj-Test-Api"].template["Resources"]
     api_types = [r["Type"] for r in api.values()]
     assert "AWS::ApiGatewayV2::Api" in api_types
+    assert any(r["Type"] == "AWS::Lambda::EventSourceMapping" for r in api.values())
+    assert any(r["Type"] == "AWS::SQS::Queue" for r in api.values())
+    dispatcher_fns = [r for r in api.values() if r["Type"] == "AWS::Lambda::Function"
+                      and r["Properties"].get("Handler") == "app.reconciler.handler"]
+    assert len(dispatcher_fns) == 1
+    assert dispatcher_fns[0]["Properties"]["Environment"]["Variables"][
+        "FMAJ_STATE_MACHINE_ARN"]
+    mappings = [r for r in api.values() if r["Type"] == "AWS::Lambda::EventSourceMapping"]
+    assert len(mappings) == 1
+    assert mappings[0]["Properties"]["MaximumRetryAttempts"] == 10
+    assert mappings[0]["Properties"]["DestinationConfig"]["OnFailure"]["Destination"]
     # (log_retention adds a helper Lambda, so match ours by its Mangum handler)
     fns = [
         r for r in api.values()

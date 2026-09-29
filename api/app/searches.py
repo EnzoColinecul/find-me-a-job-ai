@@ -13,13 +13,13 @@ location, radius) and NOT status — status lives on META and would go stale her
 and the rail links straight through to the search page, which polls it live.
 """
 import hashlib
-import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -119,6 +119,7 @@ logger = logging.getLogger(__name__)
 
 _table = None
 _sfn = None
+_serializer = TypeSerializer()
 
 
 def _session() -> boto3.Session:
@@ -141,84 +142,8 @@ def _get_sfn():
     return _sfn
 
 
-def _consume_free_search(sub: str) -> None:
-    """Flip free_search_used False->True atomically; raise QuotaExhausted otherwise."""
-    try:
-        _get_table().update_item(
-            Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
-            UpdateExpression="SET free_search_used = :t",
-            ConditionExpression="attribute_exists(PK) AND free_search_used = :f",
-            ExpressionAttributeValues={":t": True, ":f": False},
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            raise QuotaExhausted from exc
-        raise
-
-
-def _refund_free_search(sub: str) -> None:
-    """Compensate the personal quota when no workflow was handed off."""
-    try:
-        _get_table().update_item(
-            Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
-            UpdateExpression="SET free_search_used = :f",
-            ConditionExpression="free_search_used = :t",
-            ExpressionAttributeValues={":f": False, ":t": True},
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-            logger.warning("could not refund free search for %s: %s", sub, exc)
-
-
 def _month_key(when: datetime | None = None) -> str:
     return (when or datetime.now(timezone.utc)).strftime("%Y-%m")
-
-
-def _reserve_monthly_slot() -> str | None:
-    """Take one of this month's searches, or raise MonthlyCapReached.
-
-    A single counter item incremented conditionally, so the check and the
-    increment are one operation — reading the count and then writing it would
-    let two concurrent requests both see 29 and both proceed.
-
-    Returns the month key so the caller can hand the slot back if a later step
-    fails. None when the cap is switched off.
-    """
-    cap = settings.global_monthly_searches
-    if cap <= 0:
-        return None
-    month = _month_key()
-    try:
-        _get_table().update_item(
-            Key={"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"},
-            UpdateExpression="ADD #c :one",
-            ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
-            ExpressionAttributeNames={"#c": "count"},
-            ExpressionAttributeValues={":one": 1, ":cap": cap},
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            raise MonthlyCapReached from exc
-        raise
-    return month
-
-
-def _release_monthly_slot(month: str | None) -> None:
-    """Hand a reserved slot back after a later step failed."""
-    if month is None:
-        return
-    try:
-        _get_table().update_item(
-            Key={"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"},
-            UpdateExpression="ADD #c :minus",
-            ConditionExpression="#c > :zero",
-            ExpressionAttributeNames={"#c": "count"},
-            ExpressionAttributeValues={":minus": -1, ":zero": 0},
-        )
-    except ClientError as exc:
-        # Losing a slot is a rounding error against the month's budget; failing
-        # the user's request to report it would not be.
-        logger.warning("could not release monthly slot for %s: %s", month, exc)
 
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -229,15 +154,15 @@ def _search_is_finished(search_id: str) -> bool:
     if not search_id:
         return True
     item = _get_table().get_item(
-        Key={"PK": f"SEARCH#{search_id}", "SK": "META"}
+        Key={"PK": f"SEARCH#{search_id}", "SK": "META"}, ConsistentRead=True
     ).get("Item")
     if item is None:
         return True
     return item.get("status") in TERMINAL_STATUSES
 
 
-def _acquire_search_lease(sub: str, search_id: str) -> None:
-    """Claim this user's one concurrent search slot, or raise SearchInProgress.
+def _check_search_lease(sub: str) -> tuple[str, str]:
+    """Read the lease snapshot that the reservation transaction must compare.
 
     Two independent ways the slot frees up, because relying on either alone is
     broken:
@@ -258,7 +183,7 @@ def _acquire_search_lease(sub: str, search_id: str) -> None:
     cutoff = (now - timedelta(minutes=settings.search_lease_minutes)).isoformat()
 
     profile = _get_table().get_item(
-        Key={"PK": f"USER#{sub}", "SK": "PROFILE"}
+        Key={"PK": f"USER#{sub}", "SK": "PROFILE"}, ConsistentRead=True
     ).get("Item") or {}
     held_since = profile.get("active_since") or ""
     held_id = profile.get("active_search_id") or ""
@@ -267,28 +192,107 @@ def _acquire_search_lease(sub: str, search_id: str) -> None:
     if held_since >= cutoff and not _search_is_finished(held_id):
         raise SearchInProgress
 
-    try:
-        _get_table().update_item(
-            Key={"PK": f"USER#{sub}", "SK": "PROFILE"},
-            UpdateExpression="SET active_since = :now, active_search_id = :sid",
-            # Compare-and-swap against what we just read. Two requests that both
-            # decide the old lease is dead can't both take it — the second one's
-            # condition no longer matches and it gets SearchInProgress, which is
-            # the truth by then.
-            ConditionExpression=(
-                "attribute_exists(PK) AND ("
-                "attribute_not_exists(active_since) OR active_since = :expected)"
-            ),
-            ExpressionAttributeValues={
-                ":now": now.isoformat(),
-                ":sid": search_id,
-                ":expected": held_since,
-            },
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            raise SearchInProgress from exc
-        raise
+    return held_since, held_id
+
+
+def _ddb_value(value):
+    return _serializer.serialize(value)
+
+
+def _transact_search_reservation(
+    *, sub: str, req: SearchRequest, search_id: str, key_hash: str,
+    month: str, now: str, expected_since: str, expected_id: str,
+) -> dict:
+    """Atomically reserve quota/lease and persist every durable search record."""
+    meta = {
+        "PK": f"SEARCH#{search_id}", "SK": "META", "search_id": search_id,
+        "user_sub": sub, "lat": str(req.lat), "lng": str(req.lng),
+        "radius_km": str(req.radius_km),
+        "roles": [r.model_dump() for r in req.roles],
+        "query_text": req.query_text or "", "location_label": req.location_label or "",
+        "status": "pending", "created_at": now,
+        "observability_trace_id": _trace_id(search_id),
+        "execution_start_state": "pending",
+    }
+    owner_index = {
+        "PK": f"USER#{sub}", "SK": f"SEARCH#{now}#{search_id}",
+        "search_id": search_id, "roles": [r.label for r in req.roles],
+        "location_label": req.location_label or "", "lat": str(req.lat),
+        "lng": str(req.lng), "radius_km": str(req.radius_km), "created_at": now,
+    }
+    actions = [{"Update": {
+        "TableName": settings.table_name,
+        "Key": {"PK": _ddb_value(f"USER#{sub}"), "SK": _ddb_value("PROFILE")},
+        "UpdateExpression": (
+            "SET free_search_used = :used, active_since = :now, active_search_id = :sid"
+        ),
+        "ConditionExpression": (
+            "attribute_exists(PK) AND free_search_used = :unused AND "
+            "((attribute_not_exists(active_since) AND attribute_not_exists(active_search_id)) "
+            "OR (active_since = :expected_since AND "
+            "(attribute_not_exists(active_search_id) OR active_search_id = :expected_id)))"
+        ),
+        "ExpressionAttributeValues": {k: _ddb_value(v) for k, v in {
+            ":used": True, ":unused": False, ":now": now, ":sid": search_id,
+            ":expected_since": expected_since, ":expected_id": expected_id,
+        }.items()},
+    }}]
+    if settings.global_monthly_searches:
+        actions.append({"Update": {
+            "TableName": settings.table_name,
+            "Key": {"PK": _ddb_value("SYSTEM#QUOTA"), "SK": _ddb_value(f"MONTH#{month}")},
+            "UpdateExpression": "ADD #c :one",
+            "ConditionExpression": "attribute_not_exists(#c) OR #c < :cap",
+            "ExpressionAttributeNames": {"#c": "count"},
+            "ExpressionAttributeValues": {k: _ddb_value(v) for k, v in {
+                ":one": 1, ":cap": settings.global_monthly_searches,
+            }.items()},
+        }})
+    for item in (meta, owner_index):
+        actions.append({"Put": {
+            "TableName": settings.table_name,
+            "Item": {k: _ddb_value(v) for k, v in item.items()},
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }})
+    if key_hash:
+        idem = {
+            "PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{key_hash}",
+            "search_id": search_id,
+            "expires_at": int(datetime.now(timezone.utc).timestamp()) + 7 * 24 * 3600,
+        }
+        actions.append({"Put": {
+            "TableName": settings.table_name,
+            "Item": {k: _ddb_value(v) for k, v in idem.items()},
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }})
+    _get_table().meta.client.transact_write_items(
+        TransactItems=actions, ClientRequestToken=search_id,
+    )
+    return meta
+
+
+def _reservation_failed(sub: str, month: str, held_since: str, held_id: str) -> None:
+    """Translate transaction condition failures into stable API errors."""
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=settings.search_lease_minutes)).isoformat()
+    profile = _get_table().get_item(
+        Key={"PK": f"USER#{sub}", "SK": "PROFILE"}, ConsistentRead=True
+    ).get("Item") or {}
+    active_since = profile.get("active_since") or ""
+    active_id = profile.get("active_search_id") or ""
+    if (active_since >= cutoff and not _search_is_finished(active_id)) or (
+        held_since >= cutoff and not _search_is_finished(held_id)
+    ):
+        raise SearchInProgress
+    if settings.global_monthly_searches:
+        counter = _get_table().get_item(
+            Key={"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"}, ConsistentRead=True
+        ).get("Item") or {}
+        if int(counter.get("count", 0)) >= settings.global_monthly_searches:
+            raise MonthlyCapReached
+    if profile.get("free_search_used") is not False:
+        raise QuotaExhausted
+    raise SearchInProgress
 
 
 def _release_search_lease(sub: str, search_id: str) -> None:
@@ -305,22 +309,16 @@ def _release_search_lease(sub: str, search_id: str) -> None:
 
 
 def create_search(sub: str, req: SearchRequest, idempotency_key: str | None = None) -> dict:
-    """Consume quota, persist the search, kick the pipeline. Returns the META item.
-
-    Three gates, cheapest and most-reversible first, so a rejection never eats
-    something the user can't get back:
-      1. concurrency lease — catches the double-clicked button
-      2. this month's global cap — protects the free tiers
-      3. this user's free search — the only irreversible one
-    """
+    """Atomically reserve quota/lease and persist a search for stream dispatch."""
     if idempotency_key:
         key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
         existing = _get_table().get_item(
-            Key={"PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{key_hash}"}
+            Key={"PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{key_hash}"}, ConsistentRead=True
         ).get("Item")
         if existing:
             prior = _get_table().get_item(
-                Key={"PK": f"SEARCH#{existing['search_id']}", "SK": "META"}
+                Key={"PK": f"SEARCH#{existing['search_id']}", "SK": "META"},
+                ConsistentRead=True,
             ).get("Item")
             if prior and prior.get("user_sub") == sub:
                 return prior
@@ -328,18 +326,30 @@ def create_search(sub: str, req: SearchRequest, idempotency_key: str | None = No
         key_hash = ""
 
     search_id = uuid.uuid4().hex[:12]
-
-    _acquire_search_lease(sub, search_id)
+    held_since, held_id = _check_search_lease(sub)
+    month = _month_key()
+    now = datetime.now(timezone.utc).isoformat()
     try:
-        month = _reserve_monthly_slot()
-    except Exception:
-        _release_search_lease(sub, search_id)
-        raise
-    try:
-        _consume_free_search(sub)
-    except Exception:
-        _release_monthly_slot(month)
-        _release_search_lease(sub, search_id)
+        meta = _transact_search_reservation(
+            sub=sub, req=req, search_id=search_id, key_hash=key_hash,
+            month=month, now=now, expected_since=held_since, expected_id=held_id,
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+            raise
+        if key_hash:
+            existing = _get_table().get_item(
+                Key={"PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{key_hash}"},
+                ConsistentRead=True,
+            ).get("Item")
+            if existing:
+                prior = _get_table().get_item(
+                    Key={"PK": f"SEARCH#{existing['search_id']}", "SK": "META"},
+                    ConsistentRead=True,
+                ).get("Item")
+                if prior and prior.get("user_sub") == sub:
+                    return prior
+        _reservation_failed(sub, month, held_since, held_id)
         raise
 
     # The start of the search's Langfuse trace. Pipeline Lambdas join the same
@@ -352,129 +362,28 @@ def create_search(sub: str, req: SearchRequest, idempotency_key: str | None = No
     from fmaj_agent import observability
 
     labels = [r.label for r in req.roles]
-    try:
-        with observability.observe(
-            "api.create_search",
-            search_id=search_id,
-            trace_meta={"search_id": search_id, "role": ", ".join(labels)[:200],
-                        "provider": agent_config.LLM_PROVIDER},
-            tags=[f"stage:{settings.stage}", f"provider:{agent_config.LLM_PROVIDER}",
-                  *[f"role:{r}" for r in labels[:3]]],
-            input={"roles": labels, "radius_km": req.radius_km},
-        ) as obs:
-            meta = _persist_and_start(sub, req, search_id, key_hash)
-            obs.update(output={"status": meta["status"],
-                               "pipeline_started": bool(meta.get("execution_arn"))})
-            if not meta.get("execution_arn"):
-                obs.update(level="WARNING", status_message="pipeline not started")
-            return meta
-    except Exception:
-        _refund_free_search(sub)
-        _release_monthly_slot(month)
-        _release_search_lease(sub, search_id)
-        try:
-            _get_table().update_item(
-                Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-                UpdateExpression="SET #s = :failed, failed_at = :t",
-                ConditionExpression="#s IN (:pending, :running)",
-                ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={
-                    ":failed": "failed", ":t": datetime.now(timezone.utc).isoformat(),
-                    ":pending": "pending", ":running": "running",
-                },
-            )
-        except Exception:
-            logger.exception("could not mark failed creation %s", search_id)
-        raise
-    finally:
-        # API Lambdas freeze between requests too; short wait, never blocking.
-        observability.flush(timeout=1.0)
+    with observability.observe(
+        "api.create_search",
+        search_id=search_id,
+        trace_meta={"search_id": search_id, "role": ", ".join(labels)[:200],
+                    "provider": agent_config.LLM_PROVIDER},
+        tags=[f"stage:{settings.stage}", f"provider:{agent_config.LLM_PROVIDER}",
+              *[f"role:{r}" for r in labels[:3]]],
+        input={"roles": labels, "radius_km": req.radius_km},
+    ) as obs:
+        obs.update(output={"status": meta["status"], "pipeline_started": False})
+        if not settings.state_machine_arn:
+            obs.update(level="WARNING", status_message="workflow dispatcher is not configured")
+    # The DynamoDB INSERT stream is the durable handoff. Its consumer starts the
+    # workflow and records the execution ARN; returning pending is intentional.
+    observability.flush(timeout=1.0)
+    return meta
 
 
 def _trace_id(search_id: str) -> str:
     from fmaj_agent.observability import trace_id_for
 
     return trace_id_for(search_id)
-
-
-def _persist_and_start(sub: str, req: SearchRequest, search_id: str,
-                       idempotency_hash: str = "") -> dict:
-    now = datetime.now(timezone.utc).isoformat()
-    meta = {
-        "PK": f"SEARCH#{search_id}",
-        "SK": "META",
-        "search_id": search_id,
-        "user_sub": sub,
-        "lat": str(req.lat),
-        "lng": str(req.lng),
-        "radius_km": str(req.radius_km),
-        "roles": [r.model_dump() for r in req.roles],
-        "query_text": req.query_text or "",
-        "location_label": req.location_label or "",
-        "status": "pending",
-        "created_at": now,
-        # Where to find this search in Langfuse (deterministic from search_id;
-        # stored so it can be read straight off the item). Never returned by
-        # the API — get_search builds its response field by field.
-        "observability_trace_id": _trace_id(search_id),
-    }
-    _get_table().put_item(Item=meta)
-
-    # Owner index. Sorting by created_at inside the SK means "most recent first"
-    # is just a reverse query — no filtering, no scan.
-    _get_table().put_item(
-        Item={
-            "PK": f"USER#{sub}",
-            "SK": f"SEARCH#{now}#{search_id}",
-            "search_id": search_id,
-            "roles": [r.label for r in req.roles],
-            "location_label": req.location_label or "",
-            "lat": str(req.lat),
-            "lng": str(req.lng),
-            "radius_km": str(req.radius_km),
-            "created_at": now,
-        }
-    )
-
-    if idempotency_hash:
-        _get_table().put_item(
-            Item={"PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{idempotency_hash}",
-                  "search_id": search_id,
-                  "expires_at": int(datetime.now(timezone.utc).timestamp()) + 7 * 24 * 3600},
-            ConditionExpression="attribute_not_exists(PK)",
-        )
-
-    if settings.state_machine_arn:
-        try:
-            execution = _get_sfn().start_execution(
-                stateMachineArn=settings.state_machine_arn,
-                name=f"search-{search_id}",
-                input=json.dumps(
-                    {
-                        "search_id": search_id,
-                        "lat": req.lat,
-                        "lng": req.lng,
-                        "radius_km": req.radius_km,
-                        "roles": [r.model_dump() for r in req.roles],
-                    }
-                ),
-            )
-            # Stored rather than reconstructed from the state machine ARN: the
-            # execution name is ours today, but deriving an ARN by string
-            # surgery would break silently if that ever changed.
-            _get_table().update_item(
-                Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-                UpdateExpression="SET execution_arn = :a",
-                ExpressionAttributeValues={":a": execution["executionArn"]},
-            )
-            meta["execution_arn"] = execution["executionArn"]
-        except ClientError as exc:
-            logger.error("failed to start pipeline for %s: %s", search_id, exc)
-            raise RuntimeError("could not start the search workflow") from exc
-    else:
-        logger.warning("FMAJ_STATE_MACHINE_ARN not set — search %s stays pending",
-                       search_id)
-    return meta
 
 
 def list_searches(sub: str, limit: int = 10) -> list[dict]:

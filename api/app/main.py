@@ -146,11 +146,11 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
 @app.post("/searches", status_code=201)
 def post_search(
     req: SearchRequest,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
     user: AuthUser = Depends(require_user),
 ) -> dict:
     try:
-        if idempotency_key is not None and len(idempotency_key.strip()) < 8:
+        if len(idempotency_key.strip()) < 8:
             raise api_error(422, "invalid_idempotency_key",
                             "Idempotency-Key must contain at least 8 characters.")
         meta = create_search(user.sub, req, idempotency_key=idempotency_key)
