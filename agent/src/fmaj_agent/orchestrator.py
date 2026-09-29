@@ -12,16 +12,16 @@ The model backend is chosen by FMAJ_LLM_PROVIDER (bedrock|gemini) — see provid
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 from urllib.parse import urlparse
 
 from fmaj_agent import config, observability, role_match
 from fmaj_agent.budget import NoSharedBudget, SearchBudget
+from fmaj_agent.deadline import reset_deadline, set_deadline
 from fmaj_agent.models import Company, Findings, OpportunityType, ToolResult
 from fmaj_agent.providers import get_provider
-from fmaj_agent.tools.impl import RECRUITMENT_EMAIL
 from fmaj_agent.tools import (
     extract_emails,
     fetch_url,
@@ -30,6 +30,7 @@ from fmaj_agent.tools import (
     search_jobs_adzuna,
     web_search,
 )
+from fmaj_agent.tools.impl import RECRUITMENT_EMAIL
 from fmaj_agent.trace import (
     StepSink,
     Tag,
@@ -472,6 +473,7 @@ def investigate(
     budget: SearchBudget | None = None,
     search_id: str | None = None,
     should_stop: Callable[[], bool] | None = None,
+    deadline_seconds: float | None = None,
 ) -> AgentRun:
     """Run the full investigation for one company. Never raises.
 
@@ -500,7 +502,7 @@ def investigate(
                   "roles": company.roles, "provider": config.LLM_PROVIDER,
                   "model": _model(), "has_website": bool(company.website)},
     ) as obs:
-        run = _investigate(company, on_step, budget, obs, should_stop)
+        run = _investigate(company, on_step, budget, obs, should_stop, deadline_seconds)
         _record_outcome(obs, run)
         return run
 
@@ -555,12 +557,21 @@ def _record_outcome(obs, run: AgentRun) -> None:
 
 
 def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | None,
-                 obs, should_stop: Callable[[], bool] | None = None) -> AgentRun:
+                 obs, should_stop: Callable[[], bool] | None = None,
+                 deadline_seconds: float | None = None) -> AgentRun:
     budget = budget or NoSharedBudget()
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE),
                    company_id=company.place_id)
     dispatch = _dispatch_for(company)
     start = time.monotonic()
+    max_calls = config.MAX_TOOL_CALLS or float("inf")
+    max_seconds = config.MAX_SECONDS or float("inf")
+    if deadline_seconds is not None:
+        max_seconds = min(max_seconds, max(0.0, deadline_seconds))
+    # Keep a short tail for result persistence and the Lambda response path.
+    deadline_token = set_deadline(
+        start + max(0.0, max_seconds - 3.0) if max_seconds != float("inf") else None
+    )
 
     def emit(tag: Tag, tool: str, meta: str = "") -> None:
         if _stopped():
@@ -611,9 +622,6 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
         # Read off `config` at call time rather than copied into module constants,
         # so overriding the budget is a one-line change in one place (and tests
         # can patch it). 0 = unlimited — see config.py for the arithmetic.
-        max_calls = config.MAX_TOOL_CALLS or float("inf")
-        max_seconds = config.MAX_SECONDS or float("inf")
-
         while run.tool_calls < max_calls and (time.monotonic() - start) < max_seconds:
             turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024,
                                      purpose="agent.turn")
@@ -776,9 +784,15 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                       "max_seconds": config.MAX_SECONDS},
             status_message="tool-call or time budget reached; forcing report_findings",
         )
-        run.findings, downgraded = _verify(
-            _force_report(provider, messages, run), run, company.roles
-        )
+        if time.monotonic() >= start + max(max_seconds - 3.0, 0.0):
+            forced = Findings(
+                opportunity_type=OpportunityType.NONE,
+                evidence="time budget exhausted; report skipped to preserve persistence time",
+                confidence=0.0,
+            )
+        else:
+            forced = _force_report(provider, messages, run)
+        run.findings, downgraded = _verify(forced, run, company.roles)
         if downgraded:
             emit(Tag.SKIPPING, "role_match", downgraded[:60])
             obs.event("report.downgraded", level="WARNING", status_message=downgraded)
@@ -793,6 +807,8 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
             evidence=f"agent error: {type(exc).__name__}",
             confidence=0.0,
         )
+    finally:
+        reset_deadline(deadline_token)
     run.seconds = time.monotonic() - start
     return run
 

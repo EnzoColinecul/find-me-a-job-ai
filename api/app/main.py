@@ -110,6 +110,7 @@ def interpret(req: InterpretRequest, request: Request, user: AuthUser = Depends(
     Does NOT consume the free-search quota — users can rephrase as often as they like.
     """
     from fmaj_agent import observability
+    from fmaj_agent.deadline import deadline_after
     from fmaj_agent.interpret import interpret_roles
 
     client_ip = request.client.host if request.client else None
@@ -118,7 +119,8 @@ def interpret(req: InterpretRequest, request: Request, user: AuthUser = Depends(
                         "Too many role suggestions. Wait a minute and try again.")
 
     try:
-        result = interpret_roles(req.text)
+        with deadline_after(settings.max_interpret_seconds):
+            result = interpret_roles(req.text)
     finally:
         observability.flush(timeout=1.0)  # bounded; see observability.flush
     return {

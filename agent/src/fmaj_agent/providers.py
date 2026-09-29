@@ -12,10 +12,12 @@ Provider-neutral tool defs — one JSON schema per tool, adapted per provider.
 """
 
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 
 from fmaj_agent import config, observability
+from fmaj_agent.deadline import bounded_timeout, remaining_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -32,25 +34,31 @@ _RETRY_HINTS = (
     "deadline",
 )
 _MAX_ATTEMPTS = 2
+_MAX_CALL_TIMEOUT = 10.0
 
 
 def _with_retry(fn, what: str):
-    """Call fn(), retrying transient network/model errors with backoff."""
-    last: Exception | None = None
+    """Call fn(timeout), keeping attempts and backoff inside the run deadline."""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        timeout = bounded_timeout(_MAX_CALL_TIMEOUT)
         try:
-            return fn()
+            return fn(timeout)
         except Exception as exc:  # noqa: BLE001
             msg = f"{type(exc).__name__}: {exc}".lower()
             if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
                 raise
-            last = exc
-            delay = min(2**attempt, 2)  # bounded 2s backoff
+            delay = min(0.2 * (2**attempt) + random.random() * 0.1, 2.0)
+            remaining = remaining_seconds()
+            if remaining is not None and remaining <= delay + 0.05:
+                raise
+            if remaining is not None:
+                delay = min(delay, remaining - 0.05)
             logger.warning(
-                "%s transient failure (attempt %d/%d), retrying in %ds: %s", what, attempt, _MAX_ATTEMPTS, delay, exc
+                "%s transient failure (attempt %d/%d), retrying in %.2fs: %s",
+                what, attempt, _MAX_ATTEMPTS, delay, exc,
             )
             time.sleep(delay)
-    raise last  # pragma: no cover
+    raise RuntimeError("provider retry loop ended unexpectedly")  # pragma: no cover
 
 
 @dataclass
@@ -249,13 +257,8 @@ class BedrockProvider(Provider):
 
     def __init__(self) -> None:
         import boto3
-        from botocore.config import Config
 
-        self._client = boto3.client(
-            "bedrock-runtime", region_name=config.AWS_REGION,
-            config=Config(connect_timeout=3, read_timeout=10,
-                          retries={"mode": "standard", "total_max_attempts": 1}),
-        )
+        self._boto3 = boto3
 
     @staticmethod
     def _to_messages(messages: list[dict]) -> list[dict]:
@@ -304,7 +307,20 @@ class BedrockProvider(Provider):
             if force_tool:
                 tool_config["toolChoice"] = {"tool": {"name": force_tool}}
             kwargs["toolConfig"] = tool_config
-        resp = _with_retry(lambda: self._client.converse(**kwargs), "bedrock.converse")
+        def call(timeout: float):
+            from botocore.config import Config
+
+            client = self._boto3.client(
+                "bedrock-runtime", region_name=config.AWS_REGION,
+                config=Config(
+                    connect_timeout=min(3.0, timeout / 2),
+                    read_timeout=max(0.001, timeout - min(3.0, timeout / 2)),
+                    retries={"mode": "standard", "total_max_attempts": 1},
+                ),
+            )
+            return client.converse(**kwargs)
+
+        resp = _with_retry(call, "bedrock.converse")
         usage = resp.get("usage", {})
         turn = Turn(input_tokens=usage.get("inputTokens", 0), output_tokens=usage.get("outputTokens", 0))
         for c in resp["output"]["message"]["content"]:
@@ -343,14 +359,11 @@ class GeminiProvider(Provider):
         from google.genai import types as genai_types
 
         self._genai = genai
+        self._genai_types = genai_types
         self._client = genai.Client(
             vertexai=True,
             project=config.VERTEX_PROJECT,
             location=config.VERTEX_LOCATION,
-            # The API Lambda has a 30s timeout and agent budget is 60s. Keep
-            # each network attempt short enough that the bounded retry policy
-            # cannot consume either whole invocation by itself.
-            http_options=genai_types.HttpOptions(timeout=10_000),
         )
 
     def _to_contents(self, messages: list[dict]) -> list:
@@ -403,12 +416,14 @@ class GeminiProvider(Provider):
             if force_tool:
                 fcc.allowed_function_names = [force_tool]
             cfg["tool_config"] = types.ToolConfig(function_calling_config=fcc)
-        resp = _with_retry(
-            lambda: self._client.models.generate_content(
-                model=model, contents=self._to_contents(messages), config=types.GenerateContentConfig(**cfg)
-            ),
-            "gemini.generate_content",
-        )
+        def call(timeout: float):
+            request_cfg = {**cfg, "http_options": types.HttpOptions(timeout=int(timeout * 1000))}
+            return self._client.models.generate_content(
+                model=model, contents=self._to_contents(messages),
+                config=types.GenerateContentConfig(**request_cfg),
+            )
+
+        resp = _with_retry(call, "gemini.generate_content")
 
         turn = Turn()
         um = getattr(resp, "usage_metadata", None)

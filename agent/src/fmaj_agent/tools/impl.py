@@ -20,6 +20,7 @@ import trafilatura
 from bs4 import BeautifulSoup
 
 from fmaj_agent import secrets
+from fmaj_agent.deadline import bounded_timeout
 from fmaj_agent.models import ToolResult
 
 USER_AGENT = "FindMeAJobBot/0.1 (+https://github.com/EnzoColinecul/find-me-a-job-ai)"
@@ -179,7 +180,7 @@ def _request_public(url: str, *, purpose: str = "page", timeout: float = TIMEOUT
     """Follow redirects manually, revalidating DNS/IP and conduct at each hop."""
     current = url
     initial = url
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + bounded_timeout(timeout)
     for _ in range(MAX_REDIRECTS + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -480,7 +481,7 @@ def search_jobs_adzuna(company: str, role: str, country_code: str | None = None,
                 "results_per_page": 10,
                 "content-type": "application/json",
             },
-            timeout=TIMEOUT,
+            timeout=bounded_timeout(TIMEOUT),
         )
         if resp.is_error:
             return ToolResult(ok=False, reason=f"http {resp.status_code}: {resp.text[:200]}")
@@ -663,7 +664,7 @@ def web_search(query: str) -> ToolResult:
         resp = httpx.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": query, "num": 10, "api_key": secrets.serpapi_key()},
-            timeout=TIMEOUT,
+            timeout=bounded_timeout(TIMEOUT),
         )
         if resp.is_error:
             return ToolResult(ok=False, reason=f"http {resp.status_code}: {resp.text[:200]}")

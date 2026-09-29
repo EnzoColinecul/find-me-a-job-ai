@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     max_radius_km: float = 10.0
     max_interpret_chars: int = 500
     interpret_requests_per_minute: int = 10
+    max_interpret_seconds: float = 20.0
 
     # Ceiling across ALL users for a calendar month. This is the blast-radius
     # control: the free-search quota stops one person running up a bill, this

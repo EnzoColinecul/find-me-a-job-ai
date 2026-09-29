@@ -102,20 +102,27 @@ def test_result_transaction_cancellation_does_not_write_after_stop(monkeypatch):
     checks = iter([False, False, True])
     monkeypatch.setattr(handlers, "_search_stopped", lambda _sid: next(checks))
     monkeypatch.setattr(handlers, "_search_cancelled", lambda _sid: True)
-    monkeypatch.setattr(handlers, "investigate", lambda *_args, **_kwargs: SimpleNamespace(
-        cancelled=False,
-        findings=Findings(opportunity_type=OpportunityType.NONE),
-        stats=lambda: {},
-        tool_calls=0,
-        metered_calls={},
-        input_tokens=0,
-        output_tokens=0,
-        error=None,
-    ))
+    received = {}
+
+    def fake_investigate(*_args, **kwargs):
+        received.update(kwargs)
+        return SimpleNamespace(
+            cancelled=False,
+            findings=Findings(opportunity_type=OpportunityType.NONE),
+            stats=lambda: {},
+            tool_calls=0,
+            metered_calls={},
+            input_tokens=0,
+            output_tokens=0,
+            error=None,
+        )
+
+    monkeypatch.setattr(handlers, "investigate", fake_investigate)
 
     result = handlers.investigate_handler({
         "search_id": "s1",
         "company": {"place_id": "p1", "name": "Cafe", "address": "Melbourne",
                     "roles": ["chef"], "country_code": "au"},
-    })
+    }, SimpleNamespace(get_remaining_time_in_millis=lambda: 12_000))
     assert result["outcome"] == "cancelled"
+    assert received["deadline_seconds"] == 12

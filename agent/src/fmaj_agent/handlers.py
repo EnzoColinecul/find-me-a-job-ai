@@ -281,12 +281,16 @@ def investigate_handler(event: dict, _context=None) -> dict:
     # Lambda under this search spends against one counter, so raising the number
     # of companies no longer multiplies the SerpAPI bill.
     try:
+        lambda_seconds = None
+        if _context is not None and hasattr(_context, "get_remaining_time_in_millis"):
+            lambda_seconds = max(0.0, _context.get_remaining_time_in_millis() / 1000)
         run = investigate(
             company,
             on_step=lambda s: None if _search_stopped(search_id) else _put_step(search_id, s),
             budget=DynamoSearchBudget(search_id, table=_get_table()),
             search_id=search_id,
             should_stop=lambda: _search_stopped(search_id),
+            deadline_seconds=lambda_seconds,
         )
     finally:
         # The Lambda freezes on return; hand the spans over first (bounded).
