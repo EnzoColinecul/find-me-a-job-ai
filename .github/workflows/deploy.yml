@@ -25,12 +25,22 @@ env:
 
 jobs:
   deploy-test:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main'
+      }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Verify checked-out commit
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -56,12 +66,13 @@ jobs:
 
       - name: CDK deploy TEST
         working-directory: infra
-        run: uv run cdk deploy 'Fmaj-Test/*' --require-approval never
+        run: cdk deploy 'Fmaj-Test/*' --require-approval never
 
       - name: Smoke test
+        env:
+          API_URL: ${{ vars.TEST_API_URL }}
         run: |
-          URL="${{ vars.TEST_API_URL }}"
-          test -n "$URL" || { echo "::error::TEST_API_URL must be configured"; exit 1; }
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")
-          echo "GET $URL/health -> $code"
+          test -n "$API_URL" || { echo "::error::TEST_API_URL must be configured"; exit 1; }
+          code=$(curl --fail --silent --show-error --max-time 10 -o /dev/null -w "%{http_code}" "${API_URL%/}/health")
+          echo "GET ${API_URL%/}/health -> $code"
           [ "$code" = "200" ]
