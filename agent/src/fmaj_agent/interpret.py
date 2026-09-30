@@ -151,6 +151,6 @@ def _interpret_roles(text: str) -> Interpretation:
             return Interpretation(roles=out)
         logger.info("input too vague to interpret: %r", text[:80])
         return Interpretation(roles=[], ok=False, message=VAGUE_MESSAGE)
-    except Exception:  # noqa: BLE001 — never block the user on interpretation
+    except Exception:
         logger.exception("role interpretation failed")
         return Interpretation(roles=[], ok=False, message=ERROR_MESSAGE)

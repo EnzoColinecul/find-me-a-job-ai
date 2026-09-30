@@ -30,7 +30,7 @@ MAX_CHARS = 4000
 CAREERS_PATTERNS = re.compile(
     r"(career|careers|jobs|join[-\s]?us|work[-\s]?with[-\s]?us|employment|vacanc|"
     r"positions|hiring|work[-\s]?here|team|recruit)",
-    re.I,
+    re.IGNORECASE,
 )
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
@@ -39,7 +39,7 @@ EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 RECRUITMENT_EMAIL = re.compile(
     r"^(careers?|jobs?|hr|recruit\w*|people|talent|work|employment|hiring|"
     r"apply|applications?)@",
-    re.I,
+    re.IGNORECASE,
 )
 PREFERRED_EMAIL = RECRUITMENT_EMAIL  # historical name, kept for callers/tests
 
@@ -51,7 +51,7 @@ NEVER_EMAIL = re.compile(
     r"invoice|invoices|order|orders|noreply|no-reply|donotreply|do-not-reply|"
     r"privacy|legal|abuse|postmaster|webmaster|marketing|press|media|security|"
     r"unsubscribe|newsletter|spam)@",
-    re.I,
+    re.IGNORECASE,
 )
 
 #: Everything else — `info@`, `contact@`, `hello@`, `admin@` — is often the ONLY
@@ -72,7 +72,7 @@ HIRING_INVITATION = re.compile(
     r"|keen to meet"
     r"|expressions? of interest"
     r"|register your interest)",
-    re.I,
+    re.IGNORECASE,
 )
 
 _robot_cache: dict[str, tuple[float, str | None, int | None]] = {}
@@ -169,10 +169,10 @@ def _board_listing_url(url: str) -> bool:
         host, path = (parsed.hostname or "").lower(), parsed.path.lower()
         if not any(host == d or host.endswith("." + d) for d in BOARD_HOSTS):
             return False
-        if "seek.com" in host and path.endswith("/at-this-company") and not parsed.query:
-            return False
-        return True
-    except Exception:
+        return not (
+            "seek.com" in host and path.endswith("/at-this-company") and not parsed.query
+        )
+    except ValueError:
         return True
 
 
@@ -286,7 +286,7 @@ def _allowed(url: str) -> bool:
                 status = resp.status_code
                 if status == 200:
                     body = resp.text
-            except Exception:
+            except (httpx.HTTPError, httpx.InvalidURL, OSError, TimeoutError, ValueError):
                 status = 0
             _robot_cache[root] = (time.monotonic() + ROBOTS_TTL, body, status)
         if status == 404:
@@ -294,7 +294,7 @@ def _allowed(url: str) -> bool:
         if status != 200 or body is None:
             return False
         return _robots_can_fetch(body, url)
-    except Exception:
+    except (httpx.HTTPError, httpx.InvalidURL, OSError, TimeoutError, ValueError):
         # A robots lookup that times out or cannot be parsed is not permission
         # to crawl. Fail closed so an outage cannot silently bypass site policy.
         return False
@@ -355,7 +355,7 @@ def check_link_status(url: str) -> bool | None:
             if response.status_code in {401, 403, 405, 406, 409, 429, 503}:
                 return None
             return response.status_code < 400
-    except Exception:
+    except (httpx.HTTPError, httpx.InvalidURL, OSError, TimeoutError, ValueError):
         return None
     return None
 
@@ -396,7 +396,7 @@ def find_careers_link(url: str) -> ToolResult:
             return ToolResult(ok=False, reason=f"http {resp.status_code}")
         found: list[str] = []
         seen = set()
-        for m in re.finditer(r'href=["\']([^"\']+)["\']([^>]*)>([^<]*)', resp.text, re.I):
+        for m in re.finditer(r'href=["\']([^"\']+)["\']([^>]*)>([^<]*)', resp.text, re.IGNORECASE):
             href, _, label = m.groups()
             if CAREERS_PATTERNS.search(href) or CAREERS_PATTERNS.search(label):
                 absolute = urljoin(str(resp.url), href)
@@ -517,7 +517,7 @@ SEEK_COUNTRIES = frozenset({"au"})
 # Trailing legal suffixes Seek usually omits from its employer-page slugs.
 _SEEK_SUFFIX_RE = re.compile(
     r"[\s,]*\b(pty\.?\s*ltd\.?|pty\.?\s*limited|limited|ltd\.?|inc\.?|llc|corp\.?)\s*$",
-    re.I,
+    re.IGNORECASE,
 )
 
 # Seek server-renders its employer pages, so one GET distinguishes a page with
@@ -525,7 +525,7 @@ _SEEK_SUFFIX_RE = re.compile(
 #   Boxtech          -> 515,079 bytes, "No matching search results" x1, jobTitle x0
 #   Virtual-IT-Group -> 565,218 bytes, "No matching search results" x0, jobTitle x3
 _SEEK_JOB_MARKER = re.compile(r'data-automation="jobTitle"')
-_SEEK_EMPTY_MARKER = re.compile(r"No matching search results", re.I)
+_SEEK_EMPTY_MARKER = re.compile(r"No matching search results", re.IGNORECASE)
 
 #: Titles per employer page we bother to read. Deciding "is any of these the
 #: role?" needs one hit, not the whole board.
@@ -551,7 +551,7 @@ def _seek_job_titles(html: str) -> list[str]:
         raw = [
             re.sub(r"<[^>]+>", " ", m)
             for m in re.findall(
-                r'data-automation="jobTitle"[^>]*>(.{0,200}?)</', html, re.S
+                r'data-automation="jobTitle"[^>]*>(.{0,200}?)</', html, re.DOTALL
             )
         ]
     for title in raw:

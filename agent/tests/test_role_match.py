@@ -91,7 +91,7 @@ def test_the_seek_gate_keeps_a_real_match(monkeypatch) -> None:
         "job_count": 2,
         "job_titles": ["Full Stack Engineer", "Account Manager"],
     })
-    gated, report = role_match.gate_seek(result, ["software developer"])
+    gated, _report = role_match.gate_seek(result, ["software developer"])
     assert gated.ok
     assert gated.data["matching_titles"] == ["Full Stack Engineer"]
     assert gated.data["matching_count"] == 1

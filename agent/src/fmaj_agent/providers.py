@@ -43,7 +43,7 @@ def _with_retry(fn, what: str):
         timeout = bounded_timeout(_MAX_CALL_TIMEOUT)
         try:
             return fn(timeout)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             msg = f"{type(exc).__name__}: {exc}".lower()
             if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
                 raise
@@ -351,7 +351,7 @@ class GeminiProvider(Provider):
                 key_json = boto3.client("secretsmanager", region_name=config.AWS_REGION).get_secret_value(
                     SecretId=secret_name
                 )["SecretString"]
-                path = "/tmp/gcp-sa.json"  # noqa: S108 — Lambda's only writable dir
+                path = "/tmp/gcp-sa.json"
                 with open(path, "w") as f:
                     f.write(key_json)
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path

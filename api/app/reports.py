@@ -98,7 +98,7 @@ def _classify_kind(host: str, path: str) -> str:
     if "indeed." in host:
         if p.startswith("/cmp/"):
             return "company_profile"
-        if p.startswith("/viewjob") or p.startswith("/rc/clk"):
+        if p.startswith(("/viewjob", "/rc/clk")):
             return "live_listing"
         return "board_search"
     if "adzuna." in host:
@@ -188,7 +188,7 @@ def _grouped(results: list[dict]) -> list[tuple[str, list[dict]]]:
 
 
 class _Report(FPDF):
-    def footer(self) -> None:  # noqa: D401 — fpdf2 hook
+    def footer(self) -> None:
         self.set_y(-14)
         self.set_draw_color(*LINE)
         self.set_line_width(0.2)
@@ -226,7 +226,7 @@ def _title_block(pdf: _Report, search: dict) -> None:
     pdf.cell(0, 6, _t("Find Me A Job AI"), align="L")
     pdf.set_font("Helvetica", size=9)
     pdf.set_text_color(*MUTED)
-    when = datetime.now(timezone.utc).strftime("%d %b %Y")
+    when = datetime.now(timezone.utc).strftime("%d %b %Y")  # noqa: UP017 — Python 3.10 tooling compatibility
     pdf.cell(0, 6, _t(when), align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
@@ -453,7 +453,7 @@ def get_report_url(sub: str, search_id: str) -> dict | None:
                 io.BytesIO(pdf), bucket, key,
                 ExtraArgs={"ContentType": "application/pdf"},
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("failed to build/upload report for %s", search_id)
             raise
 

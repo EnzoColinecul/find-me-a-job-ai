@@ -1,5 +1,6 @@
 import logging
 import uuid
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -104,7 +105,11 @@ class InterpretRequest(BaseModel):
 
 
 @app.post("/roles/interpret")
-def interpret(req: InterpretRequest, request: Request, user: AuthUser = Depends(require_user)) -> dict:
+def interpret(
+    req: InterpretRequest,
+    request: Request,
+    user: Annotated[AuthUser, Depends(require_user)],
+) -> dict:
     """Turn the user's free-text description into role suggestions to confirm.
 
     Does NOT consume the free-search quota — users can rephrase as often as they like.
@@ -132,7 +137,7 @@ def interpret(req: InterpretRequest, request: Request, user: AuthUser = Depends(
 
 
 @app.get("/me")
-def me(user: AuthUser = Depends(require_user)) -> dict:
+def me(user: Annotated[AuthUser, Depends(require_user)]) -> dict:
     """Return the signed-in user's profile, creating it on first sign-in."""
     profile = ensure_user(user.sub, user.email, user.name)
     return {
@@ -146,8 +151,8 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
 @app.post("/searches", status_code=201)
 def post_search(
     req: SearchRequest,
+    user: Annotated[AuthUser, Depends(require_user)],
     idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
-    user: AuthUser = Depends(require_user),
 ) -> dict:
     try:
         if len(idempotency_key.strip()) < 8:
@@ -180,8 +185,8 @@ def post_search(
 
 @app.get("/searches")
 def list_searches_route(
+    user: Annotated[AuthUser, Depends(require_user)],
     limit: int = Query(default=10, ge=1, le=50),
-    user: AuthUser = Depends(require_user),
 ) -> dict:
     """The signed-in user's recent searches, newest first (workspace left rail).
 
@@ -192,7 +197,9 @@ def list_searches_route(
 
 
 @app.get("/searches/{search_id}")
-def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+def get_search_route(
+    search_id: str, user: Annotated[AuthUser, Depends(require_user)]
+) -> dict:
     found = get_search(user.sub, search_id)
     if found is None:
         raise api_error(404, "not_found", "We couldn't find that search.")
@@ -200,7 +207,9 @@ def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> 
 
 
 @app.post("/searches/{search_id}/stop")
-def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+def stop_search_route(
+    search_id: str, user: Annotated[AuthUser, Depends(require_user)]
+) -> dict:
     """Stop a running search. No quota is refunded — the work was done."""
     try:
         stopped = stop_search(user.sub, search_id)
@@ -214,7 +223,9 @@ def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) ->
 
 
 @app.get("/searches/{search_id}/report")
-def get_report_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+def get_report_route(
+    search_id: str, user: Annotated[AuthUser, Depends(require_user)]
+) -> dict:
     """A presigned URL to the search's PDF report.
 
     The PDF is a snapshot, so it only exists for a finished search — a running

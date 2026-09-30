@@ -4,8 +4,8 @@ Item shape:
   PK = USER#<sub>, SK = PROFILE
   email, name, free_search_used (bool), created_at
 """
-from datetime import datetime, timezone
 import hashlib
+from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
@@ -28,7 +28,7 @@ def _get_table():
 def ensure_user(sub: str, email: str, name: str | None) -> dict:
     """Create the user on first sign-in (idempotent), then return the profile item."""
     table = _get_table()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017 — Python 3.10 tooling compatibility
     item = {
         "PK": f"USER#{sub}",
         "SK": "PROFILE",
@@ -50,7 +50,7 @@ def ensure_user(sub: str, email: str, name: str | None) -> dict:
 
 def reserve_interpretation(sub: str, client_ip: str | None = None) -> bool:
     """Atomically cap billed role interpretation by user and forwarded client IP."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017 — Python 3.10 tooling compatibility
     window = now.strftime("%Y%m%dT%H%M")
     expires = int(now.timestamp()) + 120
     keys = [(f"USER#{sub}", f"INTERPRET#{window}")]

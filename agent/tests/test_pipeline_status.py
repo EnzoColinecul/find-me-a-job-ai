@@ -2,7 +2,6 @@
 import json
 from types import SimpleNamespace
 
-import pytest
 from botocore.exceptions import ClientError
 
 from fmaj_agent import handlers
@@ -69,8 +68,9 @@ def test_conditional_write_checks_running_state_in_same_transaction(monkeypatch)
 
 def test_conditional_write_retries_transaction_conflicts_with_same_token(monkeypatch):
     class Client:
-        calls = 0
-        tokens = []
+        def __init__(self):
+            self.calls = 0
+            self.tokens = []
 
         def transact_write_items(self, **kwargs):
             self.calls += 1
@@ -109,7 +109,7 @@ def test_result_transaction_cancellation_does_not_write_after_stop(monkeypatch):
         return SimpleNamespace(
             cancelled=False,
             findings=Findings(opportunity_type=OpportunityType.NONE),
-            stats=lambda: {},
+            stats=dict,
             tool_calls=0,
             metered_calls={},
             input_tokens=0,

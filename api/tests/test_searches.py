@@ -1,5 +1,5 @@
-from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from threading import Lock
 from types import SimpleNamespace
 
@@ -8,7 +8,7 @@ from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
-import app.searches as searches
+from app import searches
 from app.searches import QuotaExhausted, SearchRequest
 
 
@@ -19,14 +19,14 @@ class FakeTable:
         self.store: dict = {}
         self.meta = SimpleNamespace(client=FakeDynamoClient(self))
 
-    def put_item(self, Item, ConditionExpression=None):  # noqa: N803
+    def put_item(self, Item, ConditionExpression=None):
         self.store[(Item["PK"], Item["SK"])] = Item
 
-    def get_item(self, Key, ConsistentRead=False):  # noqa: N803
+    def get_item(self, Key, ConsistentRead=False):
         item = self.store.get((Key["PK"], Key["SK"]))
         return {"Item": item} if item else {}
 
-    def update_item(  # noqa: N803
+    def update_item(
         self,
         Key,
         UpdateExpression,
@@ -108,7 +108,7 @@ class FakeTable:
             attr, _, placeholder = clause.strip().partition(" = ")
             item[names.get(attr, attr)] = ExpressionAttributeValues[placeholder.strip()]
 
-    def query(  # noqa: N803
+    def query(
         self,
         KeyConditionExpression,
         ExpressionAttributeValues=None,
@@ -144,7 +144,7 @@ class FakeDynamoClient:
         self.deserialize = TypeDeserializer().deserialize
         self.lock = Lock()
 
-    def transact_write_items(self, TransactItems, ClientRequestToken=None):  # noqa: N803
+    def transact_write_items(self, TransactItems, ClientRequestToken=None):
         with self.lock:
             self._apply_transaction(TransactItems)
 
@@ -215,7 +215,7 @@ def _user(table, sub="u1", used=False):
     }
 
 
-VALID = dict(lat=-33.87, lng=151.21, radius_km=5, roles=["chef"])
+VALID = {"lat": -33.87, "lng": 151.21, "radius_km": 5, "roles": ["chef"]}
 
 
 @pytest.mark.parametrize(
@@ -339,7 +339,8 @@ def test_simultaneous_reservations_commit_only_one_search(table, monkeypatch) ->
     def create():
         try:
             return searches.create_search("u1", SearchRequest(**VALID))
-        except Exception as exc:  # collect the loser for a stable assertion
+        except (searches.SearchInProgress, searches.QuotaExhausted,
+                searches.MonthlyCapReached) as exc:  # collect the loser for a stable assertion
             return exc
 
     with ThreadPoolExecutor(max_workers=2) as pool:

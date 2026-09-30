@@ -5,11 +5,12 @@ tripwire for the two drifting apart. The PDF assertions stay at the "it renders
 and it's a PDF" level on purpose — pinning exact bytes would break on every
 harmless layout tweak.
 """
-import app.reports as reports
 import pytest
-from app.main import app
-from app.auth import AuthUser, require_user
 from fastapi.testclient import TestClient
+
+from app import reports
+from app.auth import AuthUser, require_user
+from app.main import app
 
 client = TestClient(app)
 
@@ -98,14 +99,14 @@ class _FakeS3:
         self.exists = exists
         self.uploaded = False
 
-    def head_object(self, Bucket, Key):  # noqa: N803
+    def head_object(self, Bucket, Key):
         if not self.exists:
             raise RuntimeError("404")
 
-    def upload_fileobj(self, fileobj, Bucket, Key, ExtraArgs=None):  # noqa: N803
+    def upload_fileobj(self, fileobj, Bucket, Key, ExtraArgs=None):
         self.uploaded = True
 
-    def generate_presigned_url(self, op, Params, ExpiresIn):  # noqa: N803
+    def generate_presigned_url(self, op, Params, ExpiresIn):
         return f"https://s3.example/{Params['Key']}?sig=1"
 
 

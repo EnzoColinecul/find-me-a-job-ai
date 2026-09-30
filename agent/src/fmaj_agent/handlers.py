@@ -115,7 +115,7 @@ def _put_while_running(search_id: str, item: dict) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017 — Python 3.10 tooling compatibility
 
 
 def _put_step(search_id: str, step: TraceStep) -> None:
@@ -142,7 +142,7 @@ def _put_step(search_id: str, step: TraceStep) -> None:
             **step.to_item(),
             "expires_at": int(time.time()) + STEP_TTL_SECONDS,
         })
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("could not record trace step %s for %s",
                        step.tool, search_id, exc_info=True)
 

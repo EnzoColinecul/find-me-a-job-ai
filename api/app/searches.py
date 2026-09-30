@@ -143,7 +143,7 @@ def _get_sfn():
 
 
 def _month_key(when: datetime | None = None) -> str:
-    return (when or datetime.now(timezone.utc)).strftime("%Y-%m")
+    return (when or datetime.now(timezone.utc)).strftime("%Y-%m")  # noqa: UP017 — Python 3.10 tooling compatibility
 
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -179,7 +179,7 @@ def _check_search_lease(sub: str) -> tuple[str, str]:
     that job is the pipeline, and the pipeline failing is exactly the case the
     guard has to survive.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017 — Python 3.10 tooling compatibility
     cutoff = (now - timedelta(minutes=settings.search_lease_minutes)).isoformat()
 
     profile = _get_table().get_item(
@@ -258,7 +258,7 @@ def _transact_search_reservation(
         idem = {
             "PK": f"USER#{sub}", "SK": f"IDEMPOTENCY#{key_hash}",
             "search_id": search_id,
-            "expires_at": int(datetime.now(timezone.utc).timestamp()) + 7 * 24 * 3600,
+            "expires_at": int(datetime.now(timezone.utc).timestamp()) + 7 * 24 * 3600,  # noqa: UP017 — Python 3.10 tooling compatibility
         }
         actions.append({"Put": {
             "TableName": settings.table_name,
@@ -273,7 +273,7 @@ def _transact_search_reservation(
 
 def _reservation_failed(sub: str, month: str, held_since: str, held_id: str) -> None:
     """Translate transaction condition failures into stable API errors."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017 — Python 3.10 tooling compatibility
     cutoff = (now - timedelta(minutes=settings.search_lease_minutes)).isoformat()
     profile = _get_table().get_item(
         Key={"PK": f"USER#{sub}", "SK": "PROFILE"}, ConsistentRead=True
@@ -328,7 +328,7 @@ def create_search(sub: str, req: SearchRequest, idempotency_key: str | None = No
     search_id = uuid.uuid4().hex[:12]
     held_since, held_id = _check_search_lease(sub)
     month = _month_key()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017 — Python 3.10 tooling compatibility
     try:
         meta = _transact_search_reservation(
             sub=sub, req=req, search_id=search_id, key_hash=key_hash,
@@ -452,7 +452,7 @@ def stop_search(sub: str, search_id: str) -> dict | None:
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":s": "cancelled",
-                ":t": datetime.now(timezone.utc).isoformat(),
+                ":t": datetime.now(timezone.utc).isoformat(),  # noqa: UP017 — Python 3.10 tooling compatibility
                 ":pending": "pending",
                 ":running": "running",
             },

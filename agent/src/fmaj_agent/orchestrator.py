@@ -61,7 +61,7 @@ def _dispatch_for(company: Company) -> dict:
 
     def host(url: str) -> str:
         value = (urlparse(url).hostname or "").lower().rstrip(".")
-        return value[4:] if value.startswith("www.") else value
+        return value.removeprefix("www.")
 
     allowed_hosts = {host(company.website)} if company.website else set()
     allowed_hosts.discard("")
@@ -390,7 +390,7 @@ def _emit(sink: StepSink, step: TraceStep) -> None:
     the panel is a view onto the work, not the work itself."""
     try:
         sink(step)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("trace sink failed for %s", step.tool, exc_info=True)
 
 
@@ -418,7 +418,7 @@ def _triage(company: Company, run: AgentRun) -> bool:
     text = turn.text
     try:
         return bool(json.loads(text[text.index("{"): text.rindex("}") + 1])["plausible"])
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed triage output must not discard a company
         return True  # on parse failure, don't wrongly discard
 
 
@@ -584,7 +584,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
             return False
         try:
             return bool(should_stop())
-        except Exception:  # noqa: BLE001 — cancellation lookup failure is fail-open
+        except Exception:
             logger.warning("cancellation check failed for %s", company.place_id, exc_info=True)
             return False
 
@@ -798,7 +798,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
             obs.event("report.downgraded", level="WARNING", status_message=downgraded)
         emit(Tag.FOUND if run.findings.opportunity_type is not OpportunityType.NONE else Tag.SKIPPING,
              "report_findings", run.findings.opportunity_type.value.replace("_", " "))
-    except Exception as exc:  # noqa: BLE001 — one company's failure must not crash the batch
+    except Exception as exc:
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
         emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")

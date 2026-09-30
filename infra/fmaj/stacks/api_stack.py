@@ -15,13 +15,29 @@ match the function architecture — same reasoning as PipelineStack.
 import aws_cdk as cdk
 from aws_cdk import (
     BundlingOptions,
+)
+from aws_cdk import (
     aws_apigatewayv2 as apigwv2,
+)
+from aws_cdk import (
     aws_apigatewayv2_integrations as apigwv2_int,
+)
+from aws_cdk import (
     aws_iam as iam,
+)
+from aws_cdk import (
     aws_lambda as lambda_,
+)
+from aws_cdk import (
     aws_lambda_event_sources as event_sources,
+)
+from aws_cdk import (
     aws_logs as logs,
+)
+from aws_cdk import (
     aws_secretsmanager as sm,
+)
+from aws_cdk import (
     aws_sqs as sqs,
 )
 from constructs import Construct

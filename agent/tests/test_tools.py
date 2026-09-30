@@ -337,7 +337,7 @@ def test_extract_emails_flags_a_page_that_invites_applications() -> None:
 
 def test_hiring_invitation_needs_a_phrase_not_a_keyword() -> None:
     """A "Careers" nav item is not an invitation; "send us your resume" is."""
-    match = lambda t: bool(impl.HIRING_INVITATION.search(t))  # noqa: E731
+    match = lambda t: bool(impl.HIRING_INVITATION.search(t))
     assert match("please send us your resume")
     assert match("We are currently hiring for several roles")
     assert match("View our current vacancies")

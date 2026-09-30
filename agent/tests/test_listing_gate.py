@@ -9,7 +9,11 @@ import pytest
 from fmaj_agent import role_match
 from fmaj_agent.models import Findings, OpportunityType
 from fmaj_agent.orchestrator import (
-    AgentRun, EvidenceRecord, _is_board_link, _verify, _verify_listing,
+    AgentRun,
+    EvidenceRecord,
+    _is_board_link,
+    _verify,
+    _verify_listing,
 )
 
 ROLES = ["software developer"]
@@ -326,7 +330,7 @@ def test_virtual_it_group_end_to_end(monkeypatch) -> None:
 
 # ── contact_email: an address is not automatically a lead ──────────────────
 
-from fmaj_agent.orchestrator import _verify_email  # noqa: E402
+from fmaj_agent.orchestrator import _verify_email
 
 
 def _email_run(observed=(), hiring=False) -> AgentRun:

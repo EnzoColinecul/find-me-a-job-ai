@@ -181,7 +181,7 @@ def _judge(titles: list[str], roles: list[str]) -> list[TitleVerdict] | None:
             # limit returns empty text and nothing to parse (see interpret.py).
             max_tokens=2048, json_mode=True, purpose="role_match",
         )
-    except Exception:  # noqa: BLE001 — a flaky judge must not fail the company
+    except Exception:
         logger.warning("role match judge failed for %s", roles, exc_info=True)
         return None
     verdicts = _parse(turn.text)

@@ -1,6 +1,7 @@
 """DynamoDB single-table + S3 reports bucket (per stage)."""
 import aws_cdk as cdk
-from aws_cdk import aws_dynamodb as ddb, aws_s3 as s3
+from aws_cdk import aws_dynamodb as ddb
+from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
 from fmaj.config import StageConfig

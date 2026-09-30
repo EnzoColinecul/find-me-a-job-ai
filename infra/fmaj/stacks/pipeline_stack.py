@@ -6,12 +6,26 @@ runs `pip install` inside the Lambda build image).
 import aws_cdk as cdk
 from aws_cdk import (
     BundlingOptions,
+)
+from aws_cdk import (
     aws_events as events,
+)
+from aws_cdk import (
     aws_events_targets as events_targets,
+)
+from aws_cdk import (
     aws_lambda as lambda_,
+)
+from aws_cdk import (
     aws_logs as logs,
+)
+from aws_cdk import (
     aws_secretsmanager as sm,
+)
+from aws_cdk import (
     aws_stepfunctions as sfn,
+)
+from aws_cdk import (
     aws_stepfunctions_tasks as tasks,
 )
 from constructs import Construct

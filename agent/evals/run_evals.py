@@ -28,9 +28,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from fmaj_agent.models import Company  # noqa: E402
-from fmaj_agent.orchestrator import investigate  # noqa: E402
-from fmaj_agent.tools.impl import check_link_status  # noqa: E402
+from fmaj_agent.models import Company
+from fmaj_agent.orchestrator import investigate
+from fmaj_agent.tools.impl import check_link_status
 
 GOLDEN = Path(__file__).parent / "golden.yaml"
 

@@ -7,7 +7,8 @@ generic web OAuth clients). Its outputs must exist BEFORE deploying this stack:
 See docs/google-login-setup.md.
 """
 import aws_cdk as cdk
-from aws_cdk import aws_cognito as cognito, aws_ssm as ssm
+from aws_cdk import aws_cognito as cognito
+from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 from fmaj.config import StageConfig

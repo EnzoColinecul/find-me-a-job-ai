@@ -9,10 +9,10 @@ The panel's promise is "nothing hidden", so the rules here are:
 * Display labels live in ONE place (`TOOL_LABELS`) so the panel, and later the
   PDF report, describe the same run the same way.
 """
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable
 
 
 class Tag(str, Enum):
@@ -59,7 +59,7 @@ class TraceStep:
     meta: str = ""
     place_id: str = ""
     at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()  # noqa: UP017 — Python 3.10 tooling compatibility
     )
 
     def to_item(self) -> dict:
