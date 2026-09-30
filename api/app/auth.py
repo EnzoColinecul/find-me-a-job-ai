@@ -51,7 +51,11 @@ def require_user(
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=settings.cognito_client_id,
+            audience=[
+                client_id.strip()
+                for client_id in settings.cognito_client_id.split(",")
+                if client_id.strip()
+            ],
             issuer=_issuer(),
             options={"require": ["exp", "iat", "sub"]},
         )

@@ -124,7 +124,16 @@ class ApiStack(cdk.Stack):
                 "FMAJ_TABLE_NAME": data.table.table_name,
                 "FMAJ_REPORTS_BUCKET": data.reports_bucket.bucket_name,
                 "FMAJ_COGNITO_USER_POOL_ID": auth.user_pool.user_pool_id,
-                "FMAJ_COGNITO_CLIENT_ID": auth.client.user_pool_client_id,
+                "FMAJ_COGNITO_CLIENT_ID": ",".join(
+                    [
+                        auth.client.user_pool_client_id,
+                        *(
+                            [auth.smoke_client.user_pool_client_id]
+                            if hasattr(auth, "smoke_client")
+                            else []
+                        ),
+                    ]
+                ),
                 "FMAJ_STATE_MACHINE_ARN": pipeline.state_machine.state_machine_arn,
                 # Per-stage cap reaches the running API only through this env var
                 # (settings.global_monthly_searches). Until now it defaulted to 30

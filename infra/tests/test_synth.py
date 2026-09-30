@@ -16,6 +16,25 @@ def test_stages_synth() -> None:
     assembly = app.synth()
     stacks = {s.stack_name: s for s in assembly.stacks_recursively}
     assert "Fmaj-Test-Pipeline" in stacks and "Fmaj-Prod-Pipeline" in stacks
+    test_auth = stacks["Fmaj-Test-Auth"].template["Resources"]
+    prod_auth = stacks["Fmaj-Prod-Auth"].template["Resources"]
+    test_smoke_clients = [
+        (logical_id, resource)
+        for logical_id, resource in test_auth.items()
+        if resource["Type"] == "AWS::Cognito::UserPoolClient"
+        and resource["Properties"].get("ClientName") == "fmaj-test-smoke"
+    ]
+    assert len(test_smoke_clients) == 1
+    smoke_client_ref, smoke_client = test_smoke_clients[0]
+    assert smoke_client["Properties"]["ExplicitAuthFlows"] == [
+        "ALLOW_USER_PASSWORD_AUTH",
+        "ALLOW_REFRESH_TOKEN_AUTH",
+    ]
+    assert not any(
+        r["Type"] == "AWS::Cognito::UserPoolClient"
+        and r["Properties"].get("ClientName") == "fmaj-test-smoke"
+        for r in prod_auth.values()
+    )
     data = stacks["Fmaj-Test-Data"].template["Resources"]
     tables = [r for r in data.values() if r["Type"] == "AWS::DynamoDB::Table"]
     assert len(tables) == 1
@@ -66,6 +85,17 @@ def test_stages_synth() -> None:
     flat = [a for act in actions for a in (act if isinstance(act, list) else [act])]
     assert "states:StopExecution" in flat and "states:StartExecution" in flat
     assert env["FMAJ_LANGFUSE_SECRET"] == "fmaj/test/langfuse"
+    assert smoke_client_ref in json.dumps(env["FMAJ_COGNITO_CLIENT_ID"])
+    prod_api = stacks["Fmaj-Prod-Api"].template["Resources"]
+    prod_api_fn = next(
+        r for r in prod_api.values()
+        if r["Type"] == "AWS::Lambda::Function"
+        and r["Properties"].get("Handler") == "app.main.handler"
+    )
+    prod_client_audiences = prod_api_fn["Properties"]["Environment"]["Variables"][
+        "FMAJ_COGNITO_CLIENT_ID"
+    ]
+    assert smoke_client_ref not in json.dumps(prod_client_audiences)
 
     # Langfuse: every pipeline Lambda knows where its keys are and may read them,
     # and no key value is ever baked into a template.
