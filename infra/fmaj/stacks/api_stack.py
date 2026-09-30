@@ -185,7 +185,7 @@ class ApiStack(cdk.Stack):
             max_record_age=cdk.Duration.hours(24),
             on_failure=event_sources.SqsDlq(dispatch_dlq),
             filters=[lambda_.FilterCriteria.filter({
-                "event_name": lambda_.FilterRule.is_equal("INSERT"),
+                "eventName": lambda_.FilterRule.is_equal("INSERT"),
                 "dynamodb": {"NewImage": {
                     "PK": {"S": lambda_.FilterRule.begins_with("SEARCH#")},
                     "SK": {"S": lambda_.FilterRule.is_equal("META")},

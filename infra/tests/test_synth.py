@@ -1,4 +1,6 @@
 """Smoke test: both stages synthesize without errors."""
+import json
+
 import aws_cdk as cdk
 
 from fmaj.config import PROD, TEST
@@ -38,6 +40,11 @@ def test_stages_synth() -> None:
         "FMAJ_STATE_MACHINE_ARN"]
     mappings = [r for r in api.values() if r["Type"] == "AWS::Lambda::EventSourceMapping"]
     assert len(mappings) == 1
+    filter_pattern = json.loads(
+        mappings[0]["Properties"]["FilterCriteria"]["Filters"][0]["Pattern"]
+    )
+    assert filter_pattern["eventName"] == ["INSERT"]
+    assert filter_pattern["dynamodb"]["NewImage"]["SK"]["S"] == ["META"]
     assert mappings[0]["Properties"]["MaximumRetryAttempts"] == 10
     assert mappings[0]["Properties"]["DestinationConfig"]["OnFailure"]["Destination"]
     # (log_retention adds a helper Lambda, so match ours by its Mangum handler)
