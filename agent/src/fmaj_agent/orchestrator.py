@@ -135,8 +135,8 @@ class AgentRun:
     #: Calls per metered tool, so a run's paid-API spend is visible afterwards.
     metered_calls: dict[str, int] = field(default_factory=dict)
     # Set when the run aborted due to an infrastructure failure (network/model),
-    # NOT because the agent legitimately found nothing. Callers must not treat
-    # these as real findings.
+    # NOT because the agent legitimately found nothing. Verified partial leads
+    # may survive, but callers must still count this investigation as incomplete.
     error: str | None = None
     #: Every vacancy title a tool put in front of the model this run, lowercased
     #: -> as written. Provenance for the report gate: a title the agent never saw
@@ -360,6 +360,54 @@ def _verify(findings: Findings, run: AgentRun, roles: list[str]) -> tuple[Findin
                             confidence=0.0), "; ".join(v for v in (why, email_why, "careers URL had no source") if v)
         findings = findings.model_copy(update={"links": kept_links})
     return findings, "; ".join(v for v in (why, email_why) if v)
+
+
+def _recover_observed_findings(run: AgentRun, reason: str) -> Findings:
+    """Retain proven leads after an interrupted report, without another LLM call.
+
+    Only previously matched vacancy titles, explicit careers-link tool results,
+    and emails passing the existing provenance/hiring gate qualify. An arbitrary
+    homepage, board search result, or unjudged title cannot become a lead here.
+    The run's error stays set so coverage is still reported as incomplete.
+    """
+    evidence = f"Partial check: {reason}. Only leads already verified by tools are shown."
+    for key in sorted(run.verified_titles):
+        links = sorted(url for url in run.title_sources.get(key, set())
+                       if url in run.observed_urls and run.has_evidence("vacancy_title", key, url))
+        if not links:
+            continue
+        finding, _ = _verify(Findings(
+            opportunity_type=OpportunityType.JOB_LISTING,
+            matched_title=run.observed_titles.get(key, key), links=links,
+            evidence=evidence, confidence=DOWNGRADE_CONFIDENCE,
+        ), run, [])
+        if finding.opportunity_type is OpportunityType.JOB_LISTING:
+            return finding
+
+    links = sorted({record.source_url for record in run.evidence_records
+                    if record.company_id == run.company_id
+                    and record.claim_type == "url"
+                    and record.source_type == "find_careers_link"
+                    and record.source_url in run.observed_urls
+                    and not _is_board_link(record.source_url)})
+    if links:
+        finding, _ = _verify(Findings(
+            opportunity_type=OpportunityType.CAREERS_PAGE, links=links,
+            evidence=evidence, confidence=DOWNGRADE_CONFIDENCE,
+        ), run, [])
+        if finding.opportunity_type is OpportunityType.CAREERS_PAGE:
+            return finding
+
+    for key, email in sorted(run.observed_emails.items()):
+        source_url, _ = run.observed_email_sources.get(key, ("", False))
+        finding, _ = _verify(Findings(
+            opportunity_type=OpportunityType.CONTACT_EMAIL,
+            links=[source_url] if source_url else [], emails=[email],
+            evidence=evidence, confidence=DOWNGRADE_CONFIDENCE,
+        ), run, [])
+        if finding.emails and finding.opportunity_type is OpportunityType.CONTACT_EMAIL:
+            return finding
+    return Findings(opportunity_type=OpportunityType.NONE, evidence=evidence, confidence=0.0)
 
 
 def _over_budget(run: AgentRun, tool: str, budget: SearchBudget) -> str | None:
@@ -785,11 +833,8 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
             status_message="tool-call or time budget reached; forcing report_findings",
         )
         if time.monotonic() >= start + max(max_seconds - 3.0, 0.0):
-            forced = Findings(
-                opportunity_type=OpportunityType.NONE,
-                evidence="time budget exhausted; report skipped to preserve persistence time",
-                confidence=0.0,
-            )
+            run.error = "TimeoutError: company time budget exhausted before final report"
+            forced = _recover_observed_findings(run, "time budget exhausted before final report")
         else:
             forced = _force_report(provider, messages, run)
         run.findings, downgraded = _verify(forced, run, company.roles)
@@ -799,14 +844,16 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
         emit(Tag.FOUND if run.findings.opportunity_type is not OpportunityType.NONE else Tag.SKIPPING,
              "report_findings", run.findings.opportunity_type.value.replace("_", " "))
     except Exception as exc:
+        if _stopped():
+            run.cancelled = True
+            run.seconds = time.monotonic() - start
+            return run
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
         emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")
-        run.findings = Findings(
-            opportunity_type=OpportunityType.NONE,
-            evidence=f"agent error: {type(exc).__name__}",
-            confidence=0.0,
-        )
+        run.findings = _recover_observed_findings(run, "model or tool request failed before final report")
+        if run.findings.opportunity_type is not OpportunityType.NONE:
+            emit(Tag.FOUND, "report_findings", "verified partial lead; check incomplete")
     finally:
         reset_deadline(deadline_token)
     run.seconds = time.monotonic() - start
@@ -828,7 +875,9 @@ def _force_report(provider, messages: list[dict], run: AgentRun) -> Findings:
                 return _findings_from_report(tu.input)
     except Exception as exc:  # noqa: BLE001
         logger.warning("forced report failed")
+        run.error = f"{type(exc).__name__}: {exc}"[:200]
         observability.current_event("forced_report.failed", level="ERROR",
                                     status_message=type(exc).__name__)
-    return Findings(opportunity_type=OpportunityType.NONE,
-                    evidence="budget exhausted, no finding", confidence=0.0)
+    if not run.error:
+        run.error = "ReportMissing: model returned no final report"
+    return _recover_observed_findings(run, "final model report was unavailable")

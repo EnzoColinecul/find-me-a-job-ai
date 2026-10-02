@@ -2,6 +2,31 @@
 from fmaj_agent.providers import BedrockProvider, ToolUse
 
 
+def test_gemini_wire_timeout_and_sdk_retries_are_explicit(monkeypatch):
+    from types import SimpleNamespace
+
+    from fmaj_agent import config
+    from fmaj_agent.deadline import deadline_after
+    from fmaj_agent.providers import GeminiProvider
+
+    captured = []
+
+    def generate_content(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(candidates=[], usage_metadata=None)
+
+    provider = GeminiProvider.__new__(GeminiProvider)
+    provider._client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    monkeypatch.setattr(config, "MODEL_CALL_SECONDS", 30)
+    with deadline_after(19):
+        provider._complete("", [{"role": "user", "text": "hello"}],
+                           model="test", use_tools=False, json_mode=True)
+    options = captured[0]["config"].http_options
+    assert 10000 < options.timeout <= 19000
+    assert options.retry_options.attempts == 1
+    assert captured[0]["config"].response_mime_type == "application/json"
+
+
 def test_bedrock_message_conversion() -> None:
     msgs = [
         {"role": "user", "text": "hello"},

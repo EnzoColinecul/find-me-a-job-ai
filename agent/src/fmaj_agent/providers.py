@@ -34,25 +34,29 @@ _RETRY_HINTS = (
     "deadline",
 )
 _MAX_ATTEMPTS = 2
-_MAX_CALL_TIMEOUT = 10.0
+# Vertex can return 499 when its request is cancelled upstream. Retry that
+# response only while the local run deadline still permits another attempt.
+_RETRY_STATUS_CODES = {408, 429, 499, 500, 502, 503, 504}
 
 
 def _with_retry(fn, what: str):
     """Call fn(timeout), keeping attempts and backoff inside the run deadline."""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        timeout = bounded_timeout(_MAX_CALL_TIMEOUT)
+        timeout = bounded_timeout(config.MODEL_CALL_SECONDS)
         try:
             return fn(timeout)
         except Exception as exc:
             msg = f"{type(exc).__name__}: {exc}".lower()
-            if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
+            code = getattr(exc, "code", None)
+            transient = (code in _RETRY_STATUS_CODES if isinstance(code, int)
+                         else any(h in msg for h in _RETRY_HINTS))
+            if not transient or attempt == _MAX_ATTEMPTS:
                 raise
-            delay = min(0.2 * (2**attempt) + random.random() * 0.1, 2.0)
+            delay = min(2 ** (attempt - 1) + random.random() * 0.5, 2.0)
             remaining = remaining_seconds()
-            if remaining is not None and remaining <= delay + 0.05:
+            # Do not start a retry with only milliseconds left to do useful work.
+            if remaining is not None and remaining <= delay + 1.0:
                 raise
-            if remaining is not None:
-                delay = min(delay, remaining - 0.05)
             logger.warning(
                 "%s transient failure (attempt %d/%d), retrying in %.2fs: %s",
                 what, attempt, _MAX_ATTEMPTS, delay, exc,
@@ -417,7 +421,12 @@ class GeminiProvider(Provider):
                 fcc.allowed_function_names = [force_tool]
             cfg["tool_config"] = types.ToolConfig(function_calling_config=fcc)
         def call(timeout: float):
-            request_cfg = {**cfg, "http_options": types.HttpOptions(timeout=int(timeout * 1000))}
+            request_cfg = {**cfg, "http_options": types.HttpOptions(
+                timeout=max(1, int(timeout * 1000)),
+                # The application owns retries so SDK backoff cannot overrun
+                # the company deadline or multiply paid model attempts.
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )}
             return self._client.models.generate_content(
                 model=model, contents=self._to_contents(messages),
                 config=types.GenerateContentConfig(**request_cfg),
