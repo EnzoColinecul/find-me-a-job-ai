@@ -15,7 +15,6 @@ import uuid
 from datetime import datetime, timezone
 
 import boto3
-from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 from fmaj_agent import config, observability
@@ -45,7 +44,6 @@ STEP_TTL_SECONDS = 7 * 24 * 3600
 PIN_TTL_SECONDS = 7 * 24 * 3600
 
 _table = None
-_serializer = TypeSerializer()
 
 
 def _get_table():
@@ -68,10 +66,6 @@ def _search_stopped(search_id: str) -> bool:
     return _search_status(search_id) not in {"pending", "running"}
 
 
-def _av(values: dict) -> dict:
-    return {key: _serializer.serialize(value) for key, value in values.items()}
-
-
 def _write_while_running(search_id: str, actions: list[dict]) -> None:
     """Commit row changes only while META is running, atomically with cancel.
 
@@ -79,14 +73,17 @@ def _write_while_running(search_id: str, actions: list[dict]) -> None:
     writes on the META row makes stop and a result commit a serialized choice:
     whichever transaction wins happens first, and no later result can mutate a
     cancelled/terminal search.
+
+    Use native Python values throughout: the table resource's client also
+    serializes transactions, so pre-encoded AttributeValues become maps.
     """
     table = _get_table()
     check = {"ConditionCheck": {
         "TableName": table.name,
-        "Key": _av({"PK": f"SEARCH#{search_id}", "SK": "META"}),
+        "Key": {"PK": f"SEARCH#{search_id}", "SK": "META"},
         "ConditionExpression": "#s = :running",
         "ExpressionAttributeNames": {"#s": "status"},
-        "ExpressionAttributeValues": _av({":running": "running"}),
+        "ExpressionAttributeValues": {":running": "running"},
     }}
     request = {
         "TransactItems": [check, *actions],
@@ -110,7 +107,7 @@ def _write_while_running(search_id: str, actions: list[dict]) -> None:
 
 def _put_while_running(search_id: str, item: dict) -> None:
     table = _get_table()
-    action = {"Put": {"TableName": table.name, "Item": _av(item)}}
+    action = {"Put": {"TableName": table.name, "Item": item}}
     _write_while_running(search_id, [action])
 
 
@@ -226,7 +223,7 @@ def _discover(event: dict) -> dict:
             "links": [],
             "emails": [],
         }
-        actions = [{"Put": {"TableName": table.name, "Item": _av(company_item)}}]
+        actions = [{"Put": {"TableName": table.name, "Item": company_item}}]
         # Coordinates go on a separate, expiring PIN# item — see PIN_TTL_SECONDS.
         # Stored as strings to match the META lat/lng and avoid DynamoDB's
         # float/Decimal handling; get_search parses them back. A company with no
@@ -239,7 +236,7 @@ def _discover(event: dict) -> dict:
                 "lng": str(company.lng),
                 "expires_at": int(time.time()) + PIN_TTL_SECONDS,
             }
-            actions.append({"Put": {"TableName": table.name, "Item": _av(pin_item)}})
+            actions.append({"Put": {"TableName": table.name, "Item": pin_item}})
         _write_while_running(search_id, actions)
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
@@ -303,11 +300,11 @@ def investigate_handler(event: dict, _context=None) -> dict:
     table = _get_table()
     result_update = {"Update": {
         "TableName": table.name,
-        "Key": _av({"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"}),
+        "Key": {"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
         "UpdateExpression": ("SET opportunity_type = :o, links = :l, emails = :e, "
                              "evidence = :v, confidence = :c, agent_stats = :st, "
                              "investigated_at = :t"),
-        "ExpressionAttributeValues": _av({
+        "ExpressionAttributeValues": {
             ":o": f.opportunity_type.value,
             ":l": f.links,
             ":e": f.emails,
@@ -315,7 +312,7 @@ def investigate_handler(event: dict, _context=None) -> dict:
             ":c": str(f.confidence),
             ":st": {k: str(v) for k, v in run.stats().items()},
             ":t": _now(),
-        }),
+        },
     }}
     try:
         _write_while_running(search_id, [result_update])

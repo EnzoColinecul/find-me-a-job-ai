@@ -57,13 +57,13 @@ def test_conditional_write_checks_running_state_in_same_transaction(monkeypatch)
     table = SimpleNamespace(name="searches", meta=SimpleNamespace(client=Client()))
     monkeypatch.setattr(handlers, "_get_table", lambda: table)
     handlers._write_while_running("s1", [{"Put": {
-        "TableName": "searches", "Item": {"PK": {"S": "SEARCH#s1"}},
+        "TableName": "searches", "Item": {"PK": "SEARCH#s1"},
     }}])
 
     check, put = table.meta.client.transaction
     assert check["ConditionCheck"]["ConditionExpression"] == "#s = :running"
-    assert check["ConditionCheck"]["ExpressionAttributeValues"][":running"] == {"S": "running"}
-    assert put["Put"]["Item"]["PK"] == {"S": "SEARCH#s1"}
+    assert check["ConditionCheck"]["ExpressionAttributeValues"][":running"] == "running"
+    assert put["Put"]["Item"]["PK"] == "SEARCH#s1"
 
 
 def test_conditional_write_retries_transaction_conflicts_with_same_token(monkeypatch):
@@ -84,7 +84,7 @@ def test_conditional_write_retries_transaction_conflicts_with_same_token(monkeyp
     monkeypatch.setattr(handlers, "_get_table", lambda: table)
     monkeypatch.setattr(handlers.time, "sleep", lambda _delay: None)
     handlers._write_while_running("s1", [{"Put": {
-        "TableName": "searches", "Item": {"PK": {"S": "SEARCH#s1"}},
+        "TableName": "searches", "Item": {"PK": "SEARCH#s1"},
     }}])
 
     assert client.calls == 2
