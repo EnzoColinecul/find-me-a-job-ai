@@ -5,14 +5,13 @@ import os
 from datetime import datetime, timezone
 
 import boto3
-from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 _table = None
 _sfn = None
 _deserializer = TypeDeserializer()
-_serializer = TypeSerializer()
 
 
 def _get_table():
@@ -44,42 +43,40 @@ def _compensate_permanent_start_failure(meta: dict) -> None:
     month = datetime.fromisoformat(str(meta["created_at"])).strftime("%Y-%m")
     table_name = os.environ["FMAJ_TABLE_NAME"]
 
-    def value(item):
-        return _serializer.serialize(item)
-
+    # The table resource's client encodes native values for transactions too.
     actions = [{"Update": {
         "TableName": table_name,
-        "Key": {"PK": value(meta["PK"]), "SK": value("META")},
+        "Key": {"PK": meta["PK"], "SK": "META"},
         "UpdateExpression": (
             "SET #s = :failed, execution_start_state = :start_failed, "
             "error_code = :error_code, retryable = :retryable, failed_at = :at"
         ),
         "ConditionExpression": "#s = :pending AND execution_start_state = :start_pending",
         "ExpressionAttributeNames": {"#s": "status"},
-        "ExpressionAttributeValues": {k: value(v) for k, v in {
+        "ExpressionAttributeValues": {
             ":failed": "failed", ":start_failed": "failed", ":error_code": "workflow_start_failed",
             ":retryable": False, ":at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
             ":pending": "pending", ":start_pending": "pending",
-        }.items()},
+        },
     }}, {"Update": {
         "TableName": table_name,
-        "Key": {"PK": value(f"USER#{sub}"), "SK": value("PROFILE")},
+        "Key": {"PK": f"USER#{sub}", "SK": "PROFILE"},
         "UpdateExpression": "SET free_search_used = :unused, active_since = :empty, active_search_id = :empty",
         "ConditionExpression": "free_search_used = :used AND active_search_id = :sid",
-        "ExpressionAttributeValues": {k: value(v) for k, v in {
+        "ExpressionAttributeValues": {
             ":unused": False, ":empty": "", ":used": True, ":sid": search_id,
-        }.items()},
+        },
     }}]
     if int(os.environ.get("FMAJ_GLOBAL_MONTHLY_SEARCHES", "30")):
         actions.append({"Update": {
             "TableName": table_name,
-            "Key": {"PK": value("SYSTEM#QUOTA"), "SK": value(f"MONTH#{month}")},
+            "Key": {"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"},
             "UpdateExpression": "ADD #c :minus",
             "ConditionExpression": "#c > :zero",
             "ExpressionAttributeNames": {"#c": "count"},
-            "ExpressionAttributeValues": {k: value(v) for k, v in {
+            "ExpressionAttributeValues": {
                 ":minus": -1, ":zero": 0,
-            }.items()},
+            },
         }})
     _get_table().meta.client.transact_write_items(TransactItems=actions)
 

@@ -19,7 +19,6 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Key
-from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -119,7 +118,6 @@ logger = logging.getLogger(__name__)
 
 _table = None
 _sfn = None
-_serializer = TypeSerializer()
 
 
 def _session() -> boto3.Session:
@@ -195,15 +193,15 @@ def _check_search_lease(sub: str) -> tuple[str, str]:
     return held_since, held_id
 
 
-def _ddb_value(value):
-    return _serializer.serialize(value)
-
-
 def _transact_search_reservation(
     *, sub: str, req: SearchRequest, search_id: str, key_hash: str,
     month: str, now: str, expected_since: str, expected_id: str,
 ) -> dict:
-    """Atomically reserve quota/lease and persist every durable search record."""
+    """Atomically reserve quota/lease and persist every durable search record.
+
+    The table resource's client serializes native Python values, including
+    transaction items. Pre-encoding AttributeValues would serialize them twice.
+    """
     meta = {
         "PK": f"SEARCH#{search_id}", "SK": "META", "search_id": search_id,
         "user_sub": sub, "lat": str(req.lat), "lng": str(req.lng),
@@ -222,7 +220,7 @@ def _transact_search_reservation(
     }
     actions = [{"Update": {
         "TableName": settings.table_name,
-        "Key": {"PK": _ddb_value(f"USER#{sub}"), "SK": _ddb_value("PROFILE")},
+        "Key": {"PK": f"USER#{sub}", "SK": "PROFILE"},
         "UpdateExpression": (
             "SET free_search_used = :used, active_since = :now, active_search_id = :sid"
         ),
@@ -232,26 +230,26 @@ def _transact_search_reservation(
             "OR (active_since = :expected_since AND "
             "(attribute_not_exists(active_search_id) OR active_search_id = :expected_id)))"
         ),
-        "ExpressionAttributeValues": {k: _ddb_value(v) for k, v in {
+        "ExpressionAttributeValues": {
             ":used": True, ":unused": False, ":now": now, ":sid": search_id,
             ":expected_since": expected_since, ":expected_id": expected_id,
-        }.items()},
+        },
     }}]
     if settings.global_monthly_searches:
         actions.append({"Update": {
             "TableName": settings.table_name,
-            "Key": {"PK": _ddb_value("SYSTEM#QUOTA"), "SK": _ddb_value(f"MONTH#{month}")},
+            "Key": {"PK": "SYSTEM#QUOTA", "SK": f"MONTH#{month}"},
             "UpdateExpression": "ADD #c :one",
             "ConditionExpression": "attribute_not_exists(#c) OR #c < :cap",
             "ExpressionAttributeNames": {"#c": "count"},
-            "ExpressionAttributeValues": {k: _ddb_value(v) for k, v in {
+            "ExpressionAttributeValues": {
                 ":one": 1, ":cap": settings.global_monthly_searches,
-            }.items()},
+            },
         }})
     for item in (meta, owner_index):
         actions.append({"Put": {
             "TableName": settings.table_name,
-            "Item": {k: _ddb_value(v) for k, v in item.items()},
+            "Item": item,
             "ConditionExpression": "attribute_not_exists(PK)",
         }})
     if key_hash:
@@ -262,7 +260,7 @@ def _transact_search_reservation(
         }
         actions.append({"Put": {
             "TableName": settings.table_name,
-            "Item": {k: _ddb_value(v) for k, v in idem.items()},
+            "Item": idem,
             "ConditionExpression": "attribute_not_exists(PK)",
         }})
     _get_table().meta.client.transact_write_items(

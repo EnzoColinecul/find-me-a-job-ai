@@ -4,7 +4,6 @@ from threading import Lock
 from types import SimpleNamespace
 
 import pytest
-from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -137,11 +136,10 @@ class FakeTable:
 
 
 class FakeDynamoClient:
-    """Small transactional subset used to assert all-or-nothing reservations."""
+    """Resource client fake: native values and all-or-nothing reservations."""
 
     def __init__(self, table):
         self.table = table
-        self.deserialize = TypeDeserializer().deserialize
         self.lock = Lock()
 
     def transact_write_items(self, TransactItems, ClientRequestToken=None):
@@ -159,13 +157,10 @@ class FakeDynamoClient:
         for action in TransactItems:
             if "Update" in action:
                 update = action["Update"]
-                key = {name: self.deserialize(value) for name, value in update["Key"].items()}
+                key = update["Key"]
                 identity = (key["PK"], key["SK"])
                 item = staged.get(identity)
-                values = {
-                    name: self.deserialize(value)
-                    for name, value in update["ExpressionAttributeValues"].items()
-                }
+                values = update["ExpressionAttributeValues"]
                 if "free_search_used" in update["ConditionExpression"]:
                     if item is None or item.get("free_search_used") is not values[":unused"]:
                         reject()
@@ -192,7 +187,7 @@ class FakeDynamoClient:
                     item["count"] = count + values[":one"]
             else:
                 put = action["Put"]
-                item = {name: self.deserialize(value) for name, value in put["Item"].items()}
+                item = deepcopy(put["Item"])
                 identity = (item["PK"], item["SK"])
                 if identity in staged:
                     reject()
