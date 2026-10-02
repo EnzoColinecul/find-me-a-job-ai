@@ -6,7 +6,9 @@ name: Deploy
 # Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_oidc-policy.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 concurrency:
@@ -23,9 +25,22 @@ env:
 
 jobs:
   deploy-test:
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main'
+      }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Verify checked-out commit
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -51,14 +66,77 @@ jobs:
 
       - name: CDK deploy TEST
         working-directory: infra
-        run: uv run cdk deploy 'Fmaj-Test/*' --require-approval never
+        run: cdk deploy 'Fmaj-Test/*' --require-approval never
 
       - name: Smoke test
+        env:
+          API_URL: ${{ vars.TEST_API_URL }}
         run: |
-          URL="${{ vars.TEST_API_URL }}"
-          if [ -z "$URL" ]; then
-            echo "TEST_API_URL not set yet — skipping smoke test"; exit 0
-          fi
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")
-          echo "GET $URL/health -> $code"
+          test -n "$API_URL" || { echo "::error::TEST_API_URL must be configured"; exit 1; }
+          code=$(curl --fail --silent --show-error --max-time 10 -o /dev/null -w "%{http_code}" "${API_URL%/}/health")
+          echo "GET ${API_URL%/}/health -> $code"
           [ "$code" = "200" ]
+
+      - name: Authenticated API smoke test
+        env:
+          API_URL: ${{ vars.TEST_API_URL }}
+          SMOKE_USERNAME: ${{ secrets.TEST_SMOKE_USERNAME }}
+          SMOKE_PASSWORD: ${{ secrets.TEST_SMOKE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$API_URL" || { echo "::error::TEST_API_URL must be configured"; exit 1; }
+          test -n "$SMOKE_USERNAME" || { echo "::error::TEST_SMOKE_USERNAME secret must be configured"; exit 1; }
+          test -n "$SMOKE_PASSWORD" || { echo "::error::TEST_SMOKE_PASSWORD secret must be configured"; exit 1; }
+
+          client_id=$(aws cloudformation describe-stacks \
+            --stack-name Fmaj-Test-Auth \
+            --query "Stacks[0].Outputs[?OutputKey=='SmokeTestClientId'].OutputValue | [0]" \
+            --output text)
+          test -n "$client_id" && [ "$client_id" != "None" ] || {
+            echo "::error::Fmaj-Test-Auth must export SmokeTestClientId"; exit 1;
+          }
+
+          auth_input=$(mktemp)
+          me_body=$(mktemp)
+          trap 'rm -f "$auth_input" "$me_body"' EXIT
+          python - "$auth_input" "$client_id" <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(sys.argv[1], "w", encoding="utf-8") as request:
+              json.dump(
+                  {
+                      "AuthFlow": "USER_PASSWORD_AUTH",
+                      "ClientId": sys.argv[2],
+                      "AuthParameters": {
+                          "USERNAME": os.environ["SMOKE_USERNAME"],
+                          "PASSWORD": os.environ["SMOKE_PASSWORD"],
+                      },
+                  },
+                  request,
+              )
+          PY
+
+          id_token=$(aws cognito-idp initiate-auth \
+            --cli-input-json "file://$auth_input" \
+            --query 'AuthenticationResult.IdToken' \
+            --output text)
+          test -n "$id_token" && [ "$id_token" != "None" ] || {
+            echo "::error::Cognito did not return an ID token"; exit 1;
+          }
+          code=$(curl --silent --show-error --max-time 10 \
+            --output "$me_body" --write-out "%{http_code}" \
+            --header "Authorization: Bearer $id_token" \
+            "${API_URL%/}/me")
+          echo "GET ${API_URL%/}/me -> $code"
+          [ "$code" = "200" ] || { echo "::error::Authenticated /me smoke failed"; exit 1; }
+          python - "$me_body" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as response:
+              profile = json.load(response)
+          if not isinstance(profile.get("sub"), str) or not profile["sub"]:
+              raise SystemExit("Authenticated /me response did not include a user sub")
+          PY

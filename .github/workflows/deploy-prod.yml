@@ -11,6 +11,9 @@ on:
         description: 'Type "deploy" to confirm production deploy'
         required: true
         default: ""
+      ref:
+        description: "Exact commit SHA that passed CI"
+        required: true
 
 concurrency:
   group: deploy-prod
@@ -19,6 +22,7 @@ concurrency:
 permissions:
   id-token: write
   contents: read
+  actions: read
 
 env:
   AWS_REGION: ap-southeast-2
@@ -29,12 +33,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify confirmation
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
         run: |
-          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+          if [ "$CONFIRM" != "deploy" ]; then
             echo "::error::Confirmation failed — type 'deploy' to proceed."; exit 1
           fi
+      - name: Verify tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_REF: ${{ github.event.inputs.ref }}
+        run: |
+          if ! echo "$DEPLOY_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Provide a full 40-character commit SHA."; exit 1
+          fi
+          runs=$(gh run list --workflow ci.yml --commit "$DEPLOY_REF" --event push --branch main --json headSha,conclusion)
+          tested=$(echo "$runs" | jq -e --arg sha "$DEPLOY_REF" 'any(.[]; .headSha == $sha and .conclusion == "success")')
+          [ "$tested" = "true" ] || { echo "::error::CI has not passed for $DEPLOY_REF"; exit 1; }
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Verify checked-out commit
+        env:
+          TESTED_SHA: ${{ github.event.inputs.ref }}
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -60,14 +84,13 @@ jobs:
 
       - name: CDK deploy PROD
         working-directory: infra
-        run: uv run cdk deploy 'Fmaj-Prod/*' --require-approval never
+        run: cdk deploy 'Fmaj-Prod/*' --require-approval never
 
       - name: Smoke test
+        env:
+          API_URL: ${{ vars.PROD_API_URL }}
         run: |
-          URL="${{ vars.PROD_API_URL }}"
-          if [ -z "$URL" ]; then
-            echo "PROD_API_URL not set yet — skipping smoke test"; exit 0
-          fi
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")
-          echo "GET $URL/health -> $code"
+          test -n "$API_URL" || { echo "::error::PROD_API_URL must be configured"; exit 1; }
+          code=$(curl --fail --silent --show-error --max-time 10 -o /dev/null -w "%{http_code}" "${API_URL%/}/health")
+          echo "GET ${API_URL%/}/health -> $code"
           [ "$code" = "200" ]

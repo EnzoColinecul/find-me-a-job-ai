@@ -15,12 +15,30 @@ match the function architecture — same reasoning as PipelineStack.
 import aws_cdk as cdk
 from aws_cdk import (
     BundlingOptions,
+)
+from aws_cdk import (
     aws_apigatewayv2 as apigwv2,
+)
+from aws_cdk import (
     aws_apigatewayv2_integrations as apigwv2_int,
+)
+from aws_cdk import (
     aws_iam as iam,
+)
+from aws_cdk import (
     aws_lambda as lambda_,
+)
+from aws_cdk import (
+    aws_lambda_event_sources as event_sources,
+)
+from aws_cdk import (
     aws_logs as logs,
+)
+from aws_cdk import (
     aws_secretsmanager as sm,
+)
+from aws_cdk import (
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
@@ -106,7 +124,16 @@ class ApiStack(cdk.Stack):
                 "FMAJ_TABLE_NAME": data.table.table_name,
                 "FMAJ_REPORTS_BUCKET": data.reports_bucket.bucket_name,
                 "FMAJ_COGNITO_USER_POOL_ID": auth.user_pool.user_pool_id,
-                "FMAJ_COGNITO_CLIENT_ID": auth.client.user_pool_client_id,
+                "FMAJ_COGNITO_CLIENT_ID": ",".join(
+                    [
+                        auth.client.user_pool_client_id,
+                        *(
+                            [auth.smoke_client.user_pool_client_id]
+                            if hasattr(auth, "smoke_client")
+                            else []
+                        ),
+                    ]
+                ),
                 "FMAJ_STATE_MACHINE_ARN": pipeline.state_machine.state_machine_arn,
                 # Per-stage cap reaches the running API only through this env var
                 # (settings.global_monthly_searches). Until now it defaulted to 30
@@ -126,13 +153,57 @@ class ApiStack(cdk.Stack):
             else logs.RetentionDays.ONE_MONTH,
         )
 
+        # The META item is the transactional outbox. A stream consumer starts
+        # Step Functions even if the API process exits after committing it.
+        dispatch_dlq = sqs.Queue(
+            self,
+            "SearchDispatchDlq",
+            queue_name=f"fmaj-{config.stage}-search-dispatch-dlq",
+            retention_period=cdk.Duration.days(14),
+        )
+        dispatcher = lambda_.Function(
+            self,
+            "SearchDispatcherFn",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            architecture=lambda_.Architecture.X86_64,
+            code=code,
+            handler="app.reconciler.handler",
+            timeout=cdk.Duration.seconds(30),
+            memory_size=256,
+            environment={
+                "FMAJ_AWS_REGION": self.region,
+                "FMAJ_TABLE_NAME": data.table.table_name,
+                "FMAJ_STATE_MACHINE_ARN": pipeline.state_machine.state_machine_arn,
+                "FMAJ_GLOBAL_MONTHLY_SEARCHES": str(config.monthly_search_cap),
+            },
+            log_retention=logs.RetentionDays.ONE_WEEK
+            if config.stage == "test"
+            else logs.RetentionDays.ONE_MONTH,
+        )
+
         # ── grants ────────────────────────────────────────────────
         data.table.grant_read_write_data(fn)
+        data.table.grant_read_write_data(dispatcher)
+        data.table.grant_stream_read(dispatcher)
+        pipeline.state_machine.grant_start_execution(dispatcher)
+        dispatcher.add_event_source(event_sources.DynamoEventSource(
+            data.table,
+            starting_position=lambda_.StartingPosition.TRIM_HORIZON,
+            batch_size=1,
+            retry_attempts=10,
+            max_record_age=cdk.Duration.hours(24),
+            on_failure=event_sources.SqsDlq(dispatch_dlq),
+            filters=[lambda_.FilterCriteria.filter({
+                "eventName": lambda_.FilterRule.is_equal("INSERT"),
+                "dynamodb": {"NewImage": {
+                    "PK": {"S": lambda_.FilterRule.begins_with("SEARCH#")},
+                    "SK": {"S": lambda_.FilterRule.is_equal("META")},
+                }},
+            })],
+        ))
         # PDF reports: build → put → head/get → presign (presign needs no grant,
         # the object read/write does).
         data.reports_bucket.grant_read_write(fn)
-        # Kick off a search…
-        pipeline.state_machine.grant_start_execution(fn)
         # …and stop one (POST /searches/{id}/stop). grant_start_execution does NOT
         # cover StopExecution, and Stop acts on the *execution* ARN, not the state
         # machine ARN — so grant it explicitly on this machine's executions.

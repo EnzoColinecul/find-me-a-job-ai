@@ -1,6 +1,7 @@
 """DynamoDB single-table + S3 reports bucket (per stage)."""
 import aws_cdk as cdk
-from aws_cdk import aws_dynamodb as ddb, aws_s3 as s3
+from aws_cdk import aws_dynamodb as ddb
+from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
 from fmaj.config import StageConfig
@@ -19,6 +20,7 @@ class DataStack(cdk.Stack):
             billing_mode=ddb.BillingMode.PROVISIONED,  # 25/25 free tier
             read_capacity=10,
             write_capacity=10,
+            stream=ddb.StreamViewType.NEW_IMAGE,
             # STEP# items (the live agent trace) set `expires_at`. They are
             # progress, not a record: expiring them keeps the table small and
             # avoids holding Places-derived company names indefinitely.

@@ -12,10 +12,12 @@ Provider-neutral tool defs — one JSON schema per tool, adapted per provider.
 """
 
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 
 from fmaj_agent import config, observability
+from fmaj_agent.deadline import bounded_timeout, remaining_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -31,26 +33,36 @@ _RETRY_HINTS = (
     "unavailable",
     "deadline",
 )
-_MAX_ATTEMPTS = 3
+_MAX_ATTEMPTS = 2
+# Vertex can return 499 when its request is cancelled upstream. Retry that
+# response only while the local run deadline still permits another attempt.
+_RETRY_STATUS_CODES = {408, 429, 499, 500, 502, 503, 504}
 
 
 def _with_retry(fn, what: str):
-    """Call fn(), retrying transient network/model errors with backoff."""
-    last: Exception | None = None
+    """Call fn(timeout), keeping attempts and backoff inside the run deadline."""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        timeout = bounded_timeout(config.MODEL_CALL_SECONDS)
         try:
-            return fn()
-        except Exception as exc:  # noqa: BLE001
+            return fn(timeout)
+        except Exception as exc:
             msg = f"{type(exc).__name__}: {exc}".lower()
-            if not any(h in msg for h in _RETRY_HINTS) or attempt == _MAX_ATTEMPTS:
+            code = getattr(exc, "code", None)
+            transient = (code in _RETRY_STATUS_CODES if isinstance(code, int)
+                         else any(h in msg for h in _RETRY_HINTS))
+            if not transient or attempt == _MAX_ATTEMPTS:
                 raise
-            last = exc
-            delay = 2**attempt  # 2s, 4s
+            delay = min(2 ** (attempt - 1) + random.random() * 0.5, 2.0)
+            remaining = remaining_seconds()
+            # Do not start a retry with only milliseconds left to do useful work.
+            if remaining is not None and remaining <= delay + 1.0:
+                raise
             logger.warning(
-                "%s transient failure (attempt %d/%d), retrying in %ds: %s", what, attempt, _MAX_ATTEMPTS, delay, exc
+                "%s transient failure (attempt %d/%d), retrying in %.2fs: %s",
+                what, attempt, _MAX_ATTEMPTS, delay, exc,
             )
             time.sleep(delay)
-    raise last  # pragma: no cover
+    raise RuntimeError("provider retry loop ended unexpectedly")  # pragma: no cover
 
 
 @dataclass
@@ -74,7 +86,11 @@ class Turn:
 TOOLS = [
     {
         "name": "fetch_url",
-        "description": "Fetch a web page and return its main text (truncated).",
+        "description": (
+            "Fetch an allowed company or careers page and return its main text "
+            "(truncated) plus explicit Schema.org JobPosting titles when present. "
+            "Those titles come from this page only."
+        ),
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
@@ -246,7 +262,7 @@ class BedrockProvider(Provider):
     def __init__(self) -> None:
         import boto3
 
-        self._client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
+        self._boto3 = boto3
 
     @staticmethod
     def _to_messages(messages: list[dict]) -> list[dict]:
@@ -295,7 +311,20 @@ class BedrockProvider(Provider):
             if force_tool:
                 tool_config["toolChoice"] = {"tool": {"name": force_tool}}
             kwargs["toolConfig"] = tool_config
-        resp = _with_retry(lambda: self._client.converse(**kwargs), "bedrock.converse")
+        def call(timeout: float):
+            from botocore.config import Config
+
+            client = self._boto3.client(
+                "bedrock-runtime", region_name=config.AWS_REGION,
+                config=Config(
+                    connect_timeout=min(3.0, timeout / 2),
+                    read_timeout=max(0.001, timeout - min(3.0, timeout / 2)),
+                    retries={"mode": "standard", "total_max_attempts": 1},
+                ),
+            )
+            return client.converse(**kwargs)
+
+        resp = _with_retry(call, "bedrock.converse")
         usage = resp.get("usage", {})
         turn = Turn(input_tokens=usage.get("inputTokens", 0), output_tokens=usage.get("outputTokens", 0))
         for c in resp["output"]["message"]["content"]:
@@ -326,7 +355,7 @@ class GeminiProvider(Provider):
                 key_json = boto3.client("secretsmanager", region_name=config.AWS_REGION).get_secret_value(
                     SecretId=secret_name
                 )["SecretString"]
-                path = "/tmp/gcp-sa.json"  # noqa: S108 — Lambda's only writable dir
+                path = "/tmp/gcp-sa.json"
                 with open(path, "w") as f:
                     f.write(key_json)
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
@@ -334,11 +363,11 @@ class GeminiProvider(Provider):
         from google.genai import types as genai_types
 
         self._genai = genai
+        self._genai_types = genai_types
         self._client = genai.Client(
             vertexai=True,
             project=config.VERTEX_PROJECT,
             location=config.VERTEX_LOCATION,
-            http_options=genai_types.HttpOptions(timeout=60_000),  # ms — never hang
         )
 
     def _to_contents(self, messages: list[dict]) -> list:
@@ -391,12 +420,19 @@ class GeminiProvider(Provider):
             if force_tool:
                 fcc.allowed_function_names = [force_tool]
             cfg["tool_config"] = types.ToolConfig(function_calling_config=fcc)
-        resp = _with_retry(
-            lambda: self._client.models.generate_content(
-                model=model, contents=self._to_contents(messages), config=types.GenerateContentConfig(**cfg)
-            ),
-            "gemini.generate_content",
-        )
+        def call(timeout: float):
+            request_cfg = {**cfg, "http_options": types.HttpOptions(
+                timeout=max(1, int(timeout * 1000)),
+                # The application owns retries so SDK backoff cannot overrun
+                # the company deadline or multiply paid model attempts.
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )}
+            return self._client.models.generate_content(
+                model=model, contents=self._to_contents(messages),
+                config=types.GenerateContentConfig(**request_cfg),
+            )
+
+        resp = _with_retry(call, "gemini.generate_content")
 
         turn = Turn()
         um = getattr(resp, "usage_metadata", None)

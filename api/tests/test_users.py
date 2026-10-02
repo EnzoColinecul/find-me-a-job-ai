@@ -1,12 +1,12 @@
 """Unit test for the idempotent user upsert using a fake DynamoDB table."""
-import app.users as users
+from app import users
 
 
 class FakeTable:
     def __init__(self) -> None:
         self.store: dict = {}
 
-    def put_item(self, Item, ConditionExpression=None):  # noqa: N803
+    def put_item(self, Item, ConditionExpression=None):
         key = (Item["PK"], Item["SK"])
         if ConditionExpression and key in self.store:
             from botocore.exceptions import ClientError
@@ -16,7 +16,7 @@ class FakeTable:
             )
         self.store[key] = Item
 
-    def get_item(self, Key):  # noqa: N803
+    def get_item(self, Key):
         return {"Item": self.store[(Key["PK"], Key["SK"])]}
 
 

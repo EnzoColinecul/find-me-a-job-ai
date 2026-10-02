@@ -5,6 +5,7 @@ description = "Find-Me-A-Job AI — per-company LLM agent (Bedrock Converse tool
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.35",
+    "httpcore>=1.0,<1.1",
     "httpx>=0.27",
     "pydantic>=2.9",
     "beautifulsoup4>=4.12",

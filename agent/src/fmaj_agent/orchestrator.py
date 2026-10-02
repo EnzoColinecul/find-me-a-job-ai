@@ -12,15 +12,16 @@ The model backend is chosen by FMAJ_LLM_PROVIDER (bedrock|gemini) — see provid
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fmaj_agent import config, observability, role_match
 from fmaj_agent.budget import NoSharedBudget, SearchBudget
-from fmaj_agent.models import Company, Findings, OpportunityType
+from fmaj_agent.deadline import reset_deadline, set_deadline
+from fmaj_agent.models import Company, Findings, OpportunityType, ToolResult
 from fmaj_agent.providers import get_provider
-from fmaj_agent.tools.impl import RECRUITMENT_EMAIL
 from fmaj_agent.tools import (
     extract_emails,
     fetch_url,
@@ -29,6 +30,7 @@ from fmaj_agent.tools import (
     search_jobs_adzuna,
     web_search,
 )
+from fmaj_agent.tools.impl import RECRUITMENT_EMAIL
 from fmaj_agent.trace import (
     StepSink,
     Tag,
@@ -56,23 +58,70 @@ def _dispatch_for(company: Company) -> dict:
     the app AU-only in the first place.
     """
     country = company.country_code
+
+    def host(url: str) -> str:
+        value = (urlparse(url).hostname or "").lower().rstrip(".")
+        return value.removeprefix("www.")
+
+    allowed_hosts = {host(company.website)} if company.website else set()
+    allowed_hosts.discard("")
+
+    def company_url(url: str) -> bool:
+        destination = host(url)
+        return bool(destination and any(
+            destination == allowed or destination.endswith("." + allowed)
+            for allowed in allowed_hosts
+        ))
+
+    def fetch_company_page(url: str):
+        if not company_url(url):
+            return ToolResult(ok=False, reason="URL was not linked from this company's site")
+        return fetch_url(url)
+
+    def discover_careers(url: str):
+        if not company_url(url):
+            return ToolResult(ok=False, reason="URL was not linked from this company's site")
+        result = find_careers_link(url)
+        if result.ok:
+            allowed_hosts.update(filter(None, (host(candidate) for candidate in
+                                                result.data.get("candidates", []))))
+        return result
+
+    def extract_company_emails(url: str):
+        if not company_url(url):
+            return ToolResult(ok=False, reason="URL was not linked from this company's site")
+        return extract_emails(url)
+
     return {
-        "fetch_url": lambda a: fetch_url(a["url"]),
-        "find_careers_link": lambda a: find_careers_link(a["url"]),
+        "fetch_url": lambda a: fetch_company_page(a["url"]),
+        "find_careers_link": lambda a: discover_careers(a["url"]),
         "search_jobs_adzuna": lambda a: search_jobs_adzuna(
-            a["company"], a["role"], country_code=country
+            company.name, a["role"], country_code=country, location_context=company.address
         ),
         "find_seek_company_page": lambda a: find_seek_company_page(
             a["company"], country_code=country
         ),
         "web_search": lambda a: web_search(a["query"]),
-        "extract_emails": lambda a: extract_emails(a["url"]),
+        "extract_emails": lambda a: extract_company_emails(a["url"]),
     }
 
 
 def _run_tool(dispatch: dict, name: str, args: dict):
     """Run one tool, or None for a tool we don't have. Tools never raise."""
     return dispatch[name](args) if name in dispatch else None
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    """Ephemeral provenance linking a claim to one company and one tool result."""
+
+    company_id: str
+    claim_type: str
+    claim_value: str
+    source_url: str
+    source_type: str
+    observed_at: float
+    hiring_signal: bool = False
 
 
 @dataclass
@@ -86,8 +135,8 @@ class AgentRun:
     #: Calls per metered tool, so a run's paid-API spend is visible afterwards.
     metered_calls: dict[str, int] = field(default_factory=dict)
     # Set when the run aborted due to an infrastructure failure (network/model),
-    # NOT because the agent legitimately found nothing. Callers must not treat
-    # these as real findings.
+    # NOT because the agent legitimately found nothing. Verified partial leads
+    # may survive, but callers must still count this investigation as incomplete.
     error: str | None = None
     #: Every vacancy title a tool put in front of the model this run, lowercased
     #: -> as written. Provenance for the report gate: a title the agent never saw
@@ -99,12 +148,30 @@ class AgentRun:
     #: Provenance again: an address the agent picked out of a search snippet is
     #: not evidence the company reads resumes there.
     observed_emails: dict[str, str] = field(default_factory=dict)
+    observed_email_sources: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    #: URLs returned by tools, binding each reported claim to a source actually seen.
+    observed_urls: set[str] = field(default_factory=set)
+    title_sources: dict[str, set[str]] = field(default_factory=dict)
+    location_uncertain_titles: set[str] = field(default_factory=set)
+    company_id: str = ""
+    evidence_records: list[EvidenceRecord] = field(default_factory=list)
     #: True once any fetched page invited applications ("send us your resume",
     #: "we're hiring"). It is what lets a generic `info@` count as a lead.
     saw_hiring_signal: bool = False
     #: True when the run ended in `_force_report` (tool-call or time budget hit).
     #: Observability only — not part of `stats()`, whose shape is persisted.
     forced_report: bool = False
+    #: Cooperative stop observed between bounded provider/tool calls.
+    cancelled: bool = False
+
+    def has_evidence(self, claim_type: str, claim_value: str, source_url: str) -> bool:
+        return any(
+            record.company_id == self.company_id
+            and record.claim_type == claim_type
+            and record.claim_value == claim_value
+            and record.source_url == source_url
+            for record in self.evidence_records
+        )
 
     def stats(self) -> dict:
         return {
@@ -163,17 +230,29 @@ def _verify_listing(findings: Findings, run: AgentRun, roles: list[str]) -> tupl
 
     title = (findings.matched_title or "").strip()
     key = title.lower()
+    title_sources = run.title_sources.get(key, set())
+    observed_links = [url for url in findings.links
+                      if url in run.observed_urls and url in title_sources
+                      and run.has_evidence("vacancy_title", key, url)]
     if not title:
         why = "reported a live listing without naming the vacancy"
-    elif key in run.verified_titles:
-        return findings, ""
-    elif key in run.observed_titles:
+    elif key in run.verified_titles and observed_links:
+        evidence = findings.evidence
+        if key in run.location_uncertain_titles:
+            evidence = f"{evidence} Vacancy location has not been confirmed within the selected radius.".strip()
+        return findings.model_copy(update={"links": observed_links, "evidence": evidence[:600]}), ""
+    elif key in run.observed_titles and observed_links:
         # Seen, but not yet judged — a title read out of a careers page or a
         # web_search result. Judge it now; the cache makes this usually free.
         if role_match.match_titles([run.observed_titles[key]], roles).matched:
             run.verified_titles.add(key)
-            return findings, ""
+            evidence = findings.evidence
+            if key in run.location_uncertain_titles:
+                evidence = f"{evidence} Vacancy location has not been confirmed within the selected radius.".strip()
+            return findings.model_copy(update={"links": observed_links, "evidence": evidence[:600]}), ""
         why = f'"{title[:48]}" is not the role sought'
+    elif not observed_links:
+        why = "reported a listing URL that no tool returned"
     else:
         why = f'no tool returned a vacancy titled "{title[:48]}"'
 
@@ -219,7 +298,7 @@ def _verify_email(findings: Findings, run: AgentRun) -> tuple[Findings, str]:
     `contact_email` finding only ever links to the contact page it found the
     address on, and that is not worth a card of its own.
     """
-    if findings.opportunity_type is not OpportunityType.CONTACT_EMAIL:
+    if not findings.emails:
         return findings, ""
 
     kept, unseen, weak = [], [], []
@@ -227,13 +306,29 @@ def _verify_email(findings: Findings, run: AgentRun) -> tuple[Findings, str]:
         key = email.strip().lower()
         if key not in run.observed_emails:
             unseen.append(email)
-        elif RECRUITMENT_EMAIL.match(key) or run.saw_hiring_signal:
-            kept.append(run.observed_emails[key])
+        elif key in run.observed_email_sources:
+            source_url, _ = run.observed_email_sources[key]
+            evidence = next((record for record in run.evidence_records
+                             if record.company_id == run.company_id
+                             and record.claim_type == "email"
+                             and record.claim_value == key
+                             and record.source_url == source_url), None)
+            if source_url not in findings.links or evidence is None:
+                unseen.append(email)
+            elif RECRUITMENT_EMAIL.match(key) or evidence.hiring_signal:
+                kept.append(run.observed_emails[key])
+            else:
+                weak.append(email)
         else:
             weak.append(email)
 
     if kept:
         return findings.model_copy(update={"emails": kept}), ""
+
+    if findings.opportunity_type is not OpportunityType.CONTACT_EMAIL:
+        reason = (f'"{unseen[0][:40]}" was not tied to a fetched page'
+                  if unseen else "no email had hiring provenance")
+        return findings.model_copy(update={"emails": []}), reason
 
     if unseen:
         why = f'"{unseen[0][:40]}" was not read off the company\'s own page'
@@ -255,9 +350,64 @@ def _verify(findings: Findings, run: AgentRun, roles: list[str]) -> tuple[Findin
     """Every claim the model makes about a company, checked against what the
     tools actually returned. One door, so no report path can skip it."""
     findings, why = _verify_listing(findings, run, roles)
-    if why:
-        return findings, why
-    return _verify_email(findings, run)
+    findings, email_why = _verify_email(findings, run)
+    if findings.opportunity_type is OpportunityType.CAREERS_PAGE:
+        kept_links = [url for url in findings.links
+                      if url in run.observed_urls and run.has_evidence("url", url, url)]
+        if not kept_links:
+            return Findings(opportunity_type=OpportunityType.NONE,
+                            evidence="dropped: no careers link was returned by a tool",
+                            confidence=0.0), "; ".join(v for v in (why, email_why, "careers URL had no source") if v)
+        findings = findings.model_copy(update={"links": kept_links})
+    return findings, "; ".join(v for v in (why, email_why) if v)
+
+
+def _recover_observed_findings(run: AgentRun, reason: str) -> Findings:
+    """Retain proven leads after an interrupted report, without another LLM call.
+
+    Only previously matched vacancy titles, explicit careers-link tool results,
+    and emails passing the existing provenance/hiring gate qualify. An arbitrary
+    homepage, board search result, or unjudged title cannot become a lead here.
+    The run's error stays set so coverage is still reported as incomplete.
+    """
+    evidence = f"Partial check: {reason}. Only leads already verified by tools are shown."
+    for key in sorted(run.verified_titles):
+        links = sorted(url for url in run.title_sources.get(key, set())
+                       if url in run.observed_urls and run.has_evidence("vacancy_title", key, url))
+        if not links:
+            continue
+        finding, _ = _verify(Findings(
+            opportunity_type=OpportunityType.JOB_LISTING,
+            matched_title=run.observed_titles.get(key, key), links=links,
+            evidence=evidence, confidence=DOWNGRADE_CONFIDENCE,
+        ), run, [])
+        if finding.opportunity_type is OpportunityType.JOB_LISTING:
+            return finding
+
+    links = sorted({record.source_url for record in run.evidence_records
+                    if record.company_id == run.company_id
+                    and record.claim_type == "url"
+                    and record.source_type == "find_careers_link"
+                    and record.source_url in run.observed_urls
+                    and not _is_board_link(record.source_url)})
+    if links:
+        finding, _ = _verify(Findings(
+            opportunity_type=OpportunityType.CAREERS_PAGE, links=links,
+            evidence=evidence, confidence=DOWNGRADE_CONFIDENCE,
+        ), run, [])
+        if finding.opportunity_type is OpportunityType.CAREERS_PAGE:
+            return finding
+
+    for key, email in sorted(run.observed_emails.items()):
+        source_url, _ = run.observed_email_sources.get(key, ("", False))
+        finding, _ = _verify(Findings(
+            opportunity_type=OpportunityType.CONTACT_EMAIL,
+            links=[source_url] if source_url else [], emails=[email],
+            evidence=evidence, confidence=DOWNGRADE_CONFIDENCE,
+        ), run, [])
+        if finding.emails and finding.opportunity_type is OpportunityType.CONTACT_EMAIL:
+            return finding
+    return Findings(opportunity_type=OpportunityType.NONE, evidence=evidence, confidence=0.0)
 
 
 def _over_budget(run: AgentRun, tool: str, budget: SearchBudget) -> str | None:
@@ -288,7 +438,7 @@ def _emit(sink: StepSink, step: TraceStep) -> None:
     the panel is a view onto the work, not the work itself."""
     try:
         sink(step)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("trace sink failed for %s", step.tool, exc_info=True)
 
 
@@ -316,7 +466,7 @@ def _triage(company: Company, run: AgentRun) -> bool:
     text = turn.text
     try:
         return bool(json.loads(text[text.index("{"): text.rindex("}") + 1])["plausible"])
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed triage output must not discard a company
         return True  # on parse failure, don't wrongly discard
 
 
@@ -335,11 +485,43 @@ def _findings_from_report(args: dict) -> Findings:
     )
 
 
+def _observed_urls(name: str, result) -> list[str]:
+    """URLs the named tool actually returned, for claim-level provenance."""
+    data = result.data or {}
+    if name in {"fetch_url", "find_seek_company_page", "extract_emails"}:
+        return [str(data["url"])] if data.get("url") else []
+    if name == "find_careers_link":
+        return [str(url) for url in data.get("candidates", [])]
+    if name == "search_jobs_adzuna":
+        return [str(job["url"]) for job in data.get("jobs", []) if job.get("url")]
+    if name == "web_search":
+        return [str(row["link"]) for row in data.get("results", []) if row.get("link")]
+    return []
+
+
+def _title_sources(name: str, result) -> list[tuple[str, str]]:
+    """Pair each vacancy title with the URL from the same tool result."""
+    data = result.data or {}
+    if name == "find_seek_company_page":
+        url = str(data.get("url") or "")
+        return [(str(title), url) for title in data.get("job_titles", []) if title and url]
+    if name == "search_jobs_adzuna":
+        return [(str(job.get("title") or ""), str(job.get("url") or ""))
+                for job in data.get("jobs", []) if job.get("title") and job.get("url")]
+    if name == "fetch_url":
+        url = str(data.get("url") or "")
+        return [(str(job.get("title") or ""), str(job.get("url") or url))
+                for job in data.get("vacancies", []) if job.get("title") and (job.get("url") or url)]
+    return []
+
+
 def investigate(
     company: Company,
     on_step: StepSink = noop_sink,
     budget: SearchBudget | None = None,
     search_id: str | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    deadline_seconds: float | None = None,
 ) -> AgentRun:
     """Run the full investigation for one company. Never raises.
 
@@ -368,7 +550,7 @@ def investigate(
                   "roles": company.roles, "provider": config.LLM_PROVIDER,
                   "model": _model(), "has_website": bool(company.website)},
     ) as obs:
-        run = _investigate(company, on_step, budget, obs)
+        run = _investigate(company, on_step, budget, obs, should_stop, deadline_seconds)
         _record_outcome(obs, run)
         return run
 
@@ -423,17 +605,42 @@ def _record_outcome(obs, run: AgentRun) -> None:
 
 
 def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | None,
-                 obs) -> AgentRun:
+                 obs, should_stop: Callable[[], bool] | None = None,
+                 deadline_seconds: float | None = None) -> AgentRun:
     budget = budget or NoSharedBudget()
-    run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE))
+    run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE),
+                   company_id=company.place_id)
     dispatch = _dispatch_for(company)
     start = time.monotonic()
+    max_calls = config.MAX_TOOL_CALLS or float("inf")
+    max_seconds = config.MAX_SECONDS or float("inf")
+    if deadline_seconds is not None:
+        max_seconds = min(max_seconds, max(0.0, deadline_seconds))
+    # Keep a short tail for result persistence and the Lambda response path.
+    deadline_token = set_deadline(
+        start + max(0.0, max_seconds - 3.0) if max_seconds != float("inf") else None
+    )
 
     def emit(tag: Tag, tool: str, meta: str = "") -> None:
+        if _stopped():
+            return
         _emit(on_step, TraceStep(tag=tag, tool=tool, text=company.name,
                                  meta=meta, place_id=company.place_id))
 
+    def _stopped() -> bool:
+        if should_stop is None:
+            return False
+        try:
+            return bool(should_stop())
+        except Exception:
+            logger.warning("cancellation check failed for %s", company.place_id, exc_info=True)
+            return False
+
     try:
+        if _stopped():
+            run.cancelled = True
+            run.seconds = time.monotonic() - start
+            return run
         provider = get_provider()
         if not _triage(company, run):
             emit(Tag.SKIPPING, "triage", "not a likely employer")
@@ -463,12 +670,13 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
         # Read off `config` at call time rather than copied into module constants,
         # so overriding the budget is a one-line change in one place (and tests
         # can patch it). 0 = unlimited — see config.py for the arithmetic.
-        max_calls = config.MAX_TOOL_CALLS or float("inf")
-        max_seconds = config.MAX_SECONDS or float("inf")
-
         while run.tool_calls < max_calls and (time.monotonic() - start) < max_seconds:
             turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024,
                                      purpose="agent.turn")
+            if _stopped():
+                run.cancelled = True
+                run.seconds = time.monotonic() - start
+                return run
             run.input_tokens += turn.input_tokens
             run.output_tokens += turn.output_tokens
             messages.append({"role": "assistant", "text": turn.text,
@@ -480,6 +688,10 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
             results = []
             done = False
             for tu in turn.tool_uses:
+                if _stopped():
+                    run.cancelled = True
+                    run.seconds = time.monotonic() - start
+                    return run
                 run.trace.append(f"{tu.name}({tu.input})")
                 if tu.name == "report_findings":
                     findings, downgraded = _verify(
@@ -502,6 +714,12 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                     )
                     results.append({"id": tu.id, "name": tu.name, "output": {"ok": True}})
                     continue
+                if run.tool_calls >= max_calls or (time.monotonic() - start) >= max_seconds:
+                    denial = "tool-call or time budget reached; no further tool calls allowed"
+                    emit(Tag.SKIPPING, tu.name, denial)
+                    results.append({"id": tu.id, "name": tu.name,
+                                    "output": {"ok": False, "reason": denial}})
+                    continue
                 run.tool_calls += 1
 
                 denial = _over_budget(run, tu.name, budget)
@@ -516,6 +734,14 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                                     "output": {"ok": False, "reason": denial}})
                     continue
 
+                # A stop may arrive while reserving the shared paid-tool cap.
+                # Check again immediately before dispatch so no external call
+                # starts after cancellation is visible.
+                if _stopped():
+                    run.cancelled = True
+                    run.seconds = time.monotonic() - start
+                    return run
+
                 with observability.observe(
                     f"tool.{tu.name}", as_type="tool",
                     input=observability.tool_input_summary(tu.input),
@@ -528,11 +754,52 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                     for title in role_match.observed_titles(tu.name, result):
                         run.observed_titles.setdefault(title.lower(), title)
                     if result is not None and result.ok:
+                        urls = _observed_urls(tu.name, result)
+                        run.observed_urls.update(urls)
+                        for source_url in urls:
+                            run.evidence_records.append(EvidenceRecord(
+                                company_id=company.place_id,
+                                claim_type="url",
+                                claim_value=source_url,
+                                source_url=source_url,
+                                source_type=tu.name,
+                                observed_at=time.time(),
+                            ))
+                        for title, source_url in _title_sources(tu.name, result):
+                            run.title_sources.setdefault(title.lower(), set()).add(source_url)
+                            run.evidence_records.append(EvidenceRecord(
+                                company_id=company.place_id,
+                                claim_type="vacancy_title",
+                                claim_value=title.lower(),
+                                source_url=source_url,
+                                source_type=tu.name,
+                                observed_at=time.time(),
+                            ))
+                        if tu.name == "search_jobs_adzuna":
+                            run.location_uncertain_titles |= {
+                                str(job.get("title") or "").lower()
+                                for job in result.data.get("jobs", [])
+                                if job.get("location_uncertain")
+                            }
                         if result.data.get("hiring_signal"):
                             run.saw_hiring_signal = True
                         if tu.name == "extract_emails":
                             for email in result.data.get("emails") or []:
-                                run.observed_emails.setdefault(str(email).lower(), email)
+                                key = str(email).lower()
+                                run.observed_emails.setdefault(key, email)
+                                run.observed_email_sources.setdefault(
+                                    key, (str(result.data.get("url") or ""), bool(result.data.get("hiring_signal")))
+                                )
+                                email_url = str(result.data.get("url") or "")
+                                run.evidence_records.append(EvidenceRecord(
+                                    company_id=company.place_id,
+                                    claim_type="email",
+                                    claim_value=key,
+                                    source_url=email_url,
+                                    source_type=tu.name,
+                                    observed_at=time.time(),
+                                    hiring_signal=bool(result.data.get("hiring_signal")),
+                                ))
                     gate = role_match.GATES.get(tu.name)
                     if gate is not None and result is not None and company.roles:
                         gated_ok = result.ok
@@ -565,21 +832,30 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                       "max_seconds": config.MAX_SECONDS},
             status_message="tool-call or time budget reached; forcing report_findings",
         )
-        run.findings, downgraded = _verify(
-            _force_report(provider, messages, run), run, company.roles
-        )
+        if time.monotonic() >= start + max(max_seconds - 3.0, 0.0):
+            run.error = "TimeoutError: company time budget exhausted before final report"
+            forced = _recover_observed_findings(run, "time budget exhausted before final report")
+        else:
+            forced = _force_report(provider, messages, run)
+        run.findings, downgraded = _verify(forced, run, company.roles)
         if downgraded:
             emit(Tag.SKIPPING, "role_match", downgraded[:60])
             obs.event("report.downgraded", level="WARNING", status_message=downgraded)
-    except Exception as exc:  # noqa: BLE001 — one company's failure must not crash the batch
+        emit(Tag.FOUND if run.findings.opportunity_type is not OpportunityType.NONE else Tag.SKIPPING,
+             "report_findings", run.findings.opportunity_type.value.replace("_", " "))
+    except Exception as exc:
+        if _stopped():
+            run.cancelled = True
+            run.seconds = time.monotonic() - start
+            return run
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
         emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")
-        run.findings = Findings(
-            opportunity_type=OpportunityType.NONE,
-            evidence=f"agent error: {type(exc).__name__}",
-            confidence=0.0,
-        )
+        run.findings = _recover_observed_findings(run, "model or tool request failed before final report")
+        if run.findings.opportunity_type is not OpportunityType.NONE:
+            emit(Tag.FOUND, "report_findings", "verified partial lead; check incomplete")
+    finally:
+        reset_deadline(deadline_token)
     run.seconds = time.monotonic() - start
     return run
 
@@ -599,7 +875,9 @@ def _force_report(provider, messages: list[dict], run: AgentRun) -> Findings:
                 return _findings_from_report(tu.input)
     except Exception as exc:  # noqa: BLE001
         logger.warning("forced report failed")
+        run.error = f"{type(exc).__name__}: {exc}"[:200]
         observability.current_event("forced_report.failed", level="ERROR",
                                     status_message=type(exc).__name__)
-    return Findings(opportunity_type=OpportunityType.NONE,
-                    evidence="budget exhausted, no finding", confidence=0.0)
+    if not run.error:
+        run.error = "ReportMissing: model returned no final report"
+    return _recover_observed_findings(run, "final model report was unavailable")

@@ -1,10 +1,12 @@
 import logging
+import uuid
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger("fmaj")
 
@@ -21,7 +23,7 @@ from app.searches import (
     stop_search,
 )
 from app.settings import settings
-from app.users import ensure_user
+from app.users import ensure_user, reserve_interpretation
 
 app = FastAPI(title="Find-Me-A-Job AI API", version="0.1.0")
 
@@ -38,6 +40,7 @@ def api_error(status: int, code: str, message: str) -> HTTPException:
         status_code=status, detail={"code": code, "message": message}
     )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins.split(","),
@@ -46,7 +49,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Return JSON 500s through the middleware stack so CORS headers are applied.
@@ -54,7 +56,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Without this, unhandled exceptions bypass CORSMiddleware and the browser reports
     an opaque 'Failed to fetch' instead of the real error.
     """
-    logger.exception("Unhandled error on %s %s: %s", request.method, request.url.path, exc)
+    request_id = uuid.uuid4().hex
+    logger.exception("Unhandled error request_id=%s on %s %s: %s",
+                     request_id, request.method, request.url.path, exc)
+    headers = {}
+    headers["X-Request-ID"] = request_id
+    origin = request.headers.get("origin")
+    if origin and origin in settings.cors_origins.split(","):
+        headers.update({
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        })
     return JSONResponse(
         status_code=500,
         content={
@@ -64,8 +77,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
                 # find the log line, and messages can carry table names, ARNs or
                 # user data we don't want in a browser.
                 "message": f"Something went wrong on our side ({type(exc).__name__}).",
+                "request_id": request_id,
             }
         },
+        headers=headers,
     )
 
 
@@ -86,20 +101,31 @@ def get_config() -> dict:
 
 
 class InterpretRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=settings.max_interpret_chars)
 
 
 @app.post("/roles/interpret")
-def interpret(req: InterpretRequest, user: AuthUser = Depends(require_user)) -> dict:
+def interpret(
+    req: InterpretRequest,
+    request: Request,
+    user: Annotated[AuthUser, Depends(require_user)],
+) -> dict:
     """Turn the user's free-text description into role suggestions to confirm.
 
     Does NOT consume the free-search quota — users can rephrase as often as they like.
     """
     from fmaj_agent import observability
+    from fmaj_agent.deadline import deadline_after
     from fmaj_agent.interpret import interpret_roles
 
+    client_ip = request.client.host if request.client else None
+    if not reserve_interpretation(user.sub, client_ip):
+        raise api_error(429, "interpret_rate_limited",
+                        "Too many role suggestions. Wait a minute and try again.")
+
     try:
-        result = interpret_roles(req.text)
+        with deadline_after(settings.max_interpret_seconds):
+            result = interpret_roles(req.text)
     finally:
         observability.flush(timeout=1.0)  # bounded; see observability.flush
     return {
@@ -111,7 +137,7 @@ def interpret(req: InterpretRequest, user: AuthUser = Depends(require_user)) -> 
 
 
 @app.get("/me")
-def me(user: AuthUser = Depends(require_user)) -> dict:
+def me(user: Annotated[AuthUser, Depends(require_user)]) -> dict:
     """Return the signed-in user's profile, creating it on first sign-in."""
     profile = ensure_user(user.sub, user.email, user.name)
     return {
@@ -123,9 +149,16 @@ def me(user: AuthUser = Depends(require_user)) -> dict:
 
 
 @app.post("/searches", status_code=201)
-def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> dict:
+def post_search(
+    req: SearchRequest,
+    user: Annotated[AuthUser, Depends(require_user)],
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
+) -> dict:
     try:
-        meta = create_search(user.sub, req)
+        if len(idempotency_key.strip()) < 8:
+            raise api_error(422, "invalid_idempotency_key",
+                            "Idempotency-Key must contain at least 8 characters.")
+        meta = create_search(user.sub, req, idempotency_key=idempotency_key)
     except SearchInProgress:
         # 409, not 429: nothing is being rate-limited, they simply already have
         # one running and the honest fix is to wait for it or stop it.
@@ -152,8 +185,8 @@ def post_search(req: SearchRequest, user: AuthUser = Depends(require_user)) -> d
 
 @app.get("/searches")
 def list_searches_route(
+    user: Annotated[AuthUser, Depends(require_user)],
     limit: int = Query(default=10, ge=1, le=50),
-    user: AuthUser = Depends(require_user),
 ) -> dict:
     """The signed-in user's recent searches, newest first (workspace left rail).
 
@@ -164,7 +197,9 @@ def list_searches_route(
 
 
 @app.get("/searches/{search_id}")
-def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+def get_search_route(
+    search_id: str, user: Annotated[AuthUser, Depends(require_user)]
+) -> dict:
     found = get_search(user.sub, search_id)
     if found is None:
         raise api_error(404, "not_found", "We couldn't find that search.")
@@ -172,7 +207,9 @@ def get_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> 
 
 
 @app.post("/searches/{search_id}/stop")
-def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+def stop_search_route(
+    search_id: str, user: Annotated[AuthUser, Depends(require_user)]
+) -> dict:
     """Stop a running search. No quota is refunded — the work was done."""
     try:
         stopped = stop_search(user.sub, search_id)
@@ -186,7 +223,9 @@ def stop_search_route(search_id: str, user: AuthUser = Depends(require_user)) ->
 
 
 @app.get("/searches/{search_id}/report")
-def get_report_route(search_id: str, user: AuthUser = Depends(require_user)) -> dict:
+def get_report_route(
+    search_id: str, user: Annotated[AuthUser, Depends(require_user)]
+) -> dict:
     """A presigned URL to the search's PDF report.
 
     The PDF is a snapshot, so it only exists for a finished search — a running

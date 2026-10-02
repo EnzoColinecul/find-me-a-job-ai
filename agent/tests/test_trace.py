@@ -9,13 +9,15 @@ from fmaj_agent.trace import (
 
 
 class _Result:
-    """Stands in for a ToolResult: anything with model_dump()."""
+    """Serialize like the production ToolResult envelope."""
 
     def __init__(self, **data):
         self._data = data
 
     def model_dump(self):
-        return self._data
+        payload = {k: v for k, v in self._data.items() if k not in {"ok", "reason"}}
+        return {"ok": self._data.get("ok", True), "reason": self._data.get("reason", ""),
+                "data": payload}
 
 
 def test_every_label_names_a_tool_we_actually_run() -> None:
@@ -55,7 +57,7 @@ def test_empty_results_never_report_found() -> None:
     for name, payload in [
         ("search_jobs_adzuna", {"jobs": []}),
         ("extract_emails", {"emails": []}),
-        ("find_careers_link", {"url": ""}),
+        ("find_careers_link", {"candidates": []}),
         # An employer page we couldn't verify must never read as a find.
         ("find_seek_company_page", {"job_count": 0}),
         # Vacancies exist but the role gate hasn't cleared any -> not a find.
@@ -121,3 +123,15 @@ def test_seek_meta_names_the_matches_not_the_vacancy_count() -> None:
         _Result(ok=True, job_count=3, matching_count=1),
     )
     assert tag is Tag.FOUND and meta == "1 of 3 match the role"
+
+
+def test_tool_result_nested_data_drives_real_trace_summary() -> None:
+    from fmaj_agent.models import ToolResult
+
+    result = ToolResult(ok=True, data={"jobs": [{"title": "Chef"}]})
+    tag, meta = summarise_tool_result("search_jobs_adzuna", {}, result)
+    assert tag is Tag.FOUND and meta == "1 match"
+
+    result = ToolResult(ok=True, data={"candidates": ["https://site.test/careers"]})
+    tag, meta = summarise_tool_result("find_careers_link", {}, result)
+    assert tag is Tag.FOUND and meta == "careers page"

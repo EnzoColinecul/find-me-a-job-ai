@@ -134,6 +134,11 @@ export default function SearchPage({
     ? null
     : search.status === "failed"
       ? { tone: "failed" as const, text: "This search didn't finish" }
+      : search.status === "degraded"
+        ? {
+            tone: "failed" as const,
+            text: `Partially checked — ${search.company_errors ?? 0} companies could not be checked`,
+          }
       : search.status === "cancelled"
         ? {
             tone: "done" as const,
@@ -317,6 +322,15 @@ export default function SearchPage({
                 It didn&apos;t finish, so this isn&apos;t a &quot;nothing
                 found&quot; answer. Please try again — if it keeps happening,
                 the problem is on our side.
+              </p>
+            </div>
+          )}
+
+          {search.status === "degraded" && (
+            <div className="absolute right-5 bottom-20 left-5 rounded-panel border border-pin/40 bg-surface-plain px-4 py-3 shadow-float lg:left-auto lg:w-[330px]">
+              <strong className="text-[13px] text-ink">Some checks did not finish.</strong>
+              <p className="mt-1 mb-0 text-[12px] leading-normal text-slate-muted">
+                Results include companies that completed, but {search.company_errors ?? 0} could not be checked. Treat this as a partial search.
               </p>
             </div>
           )}

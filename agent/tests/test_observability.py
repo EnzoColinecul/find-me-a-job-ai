@@ -210,6 +210,8 @@ def test_pipeline_steps_join_the_same_trace(spans, monkeypatch):
     class Table:
         def update_item(self, **kw):
             pass
+        def get_item(self, **kw):
+            return {"Item": {"status": "running"}}
 
     monkeypatch.setattr(handlers, "_get_table", lambda: Table())
     handlers.aggregate_handler({"search_id": SEARCH_ID, "results": [
@@ -226,6 +228,29 @@ def test_pipeline_steps_join_the_same_trace(spans, monkeypatch):
     (failed,) = _by_name(got, "search.failed")
     assert _attrs(failed)["langfuse.observation.level"] == "ERROR"
     assert EMAIL not in _all_text(got) and API_KEY not in _all_text(got)
+
+
+def test_aggregate_marks_partial_company_failures_as_degraded(monkeypatch):
+    class Table:
+        update = None
+
+        def get_item(self, **_kw):
+            return {"Item": {"status": "running"}}
+
+        def update_item(self, **kw):
+            self.update = kw
+
+    table = Table()
+    monkeypatch.setattr(handlers, "_get_table", lambda: table)
+    result = handlers.aggregate_handler({"search_id": SEARCH_ID, "results": [
+        {"opportunity_type": "careers_page", "outcome": "success"},
+        {"opportunity_type": "none", "outcome": "error"},
+    ]})
+    assert result["status"] == "degraded"
+    assert result["company_errors"] == 1
+    assert table.update["ExpressionAttributeValues"][":s"] == "degraded"
+    assert table.update["ExpressionAttributeValues"][":e"] == 1
+    assert "ConditionExpression" in table.update
 
 
 def test_trace_id_matches_langfuse_seeded_ids():

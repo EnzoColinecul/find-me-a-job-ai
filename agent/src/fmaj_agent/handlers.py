@@ -6,12 +6,16 @@ State machine (PipelineStack):
 Each handler writes to DynamoDB incrementally so the frontend's polling endpoint
 (GET /searches/{id}) can stream progress. Handlers are also runnable locally.
 """
+import json
 import logging
 import os
+import random
 import time
+import uuid
 from datetime import datetime, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 
 from fmaj_agent import config, observability
 from fmaj_agent.budget import DynamoSearchBudget
@@ -49,8 +53,66 @@ def _get_table():
     return _table
 
 
+def _search_status(search_id: str) -> str:
+    item = _get_table().get_item(Key={"PK": f"SEARCH#{search_id}", "SK": "META"}).get("Item") or {}
+    return str(item.get("status", "unknown"))
+
+
+def _search_cancelled(search_id: str) -> bool:
+    return _search_status(search_id) == "cancelled"
+
+
+def _search_stopped(search_id: str) -> bool:
+    return _search_status(search_id) not in {"pending", "running"}
+
+
+def _write_while_running(search_id: str, actions: list[dict]) -> None:
+    """Commit row changes only while META is running, atomically with cancel.
+
+    Step Functions cannot stop a Lambda already in flight. Conditioning these
+    writes on the META row makes stop and a result commit a serialized choice:
+    whichever transaction wins happens first, and no later result can mutate a
+    cancelled/terminal search.
+
+    Use native Python values throughout: the table resource's client also
+    serializes transactions, so pre-encoded AttributeValues become maps.
+    """
+    table = _get_table()
+    check = {"ConditionCheck": {
+        "TableName": table.name,
+        "Key": {"PK": f"SEARCH#{search_id}", "SK": "META"},
+        "ConditionExpression": "#s = :running",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {":running": "running"},
+    }}
+    request = {
+        "TransactItems": [check, *actions],
+        "ClientRequestToken": uuid.uuid4().hex,
+    }
+    for attempt in range(3):
+        try:
+            table.meta.client.transact_write_items(**request)
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            transient = code in {
+                "TransactionConflictException",
+                "ProvisionedThroughputExceededException",
+                "ThrottlingException",
+            }
+            if not transient or attempt == 2:
+                raise
+            time.sleep(0.05 * (2**attempt) + random.random() * 0.05)
+
+
+def _put_while_running(search_id: str, item: dict) -> None:
+    table = _get_table()
+    action = {"Put": {"TableName": table.name, "Item": item}}
+    _write_while_running(search_id, [action])
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017 — Python 3.10 tooling compatibility
 
 
 def _put_step(search_id: str, step: TraceStep) -> None:
@@ -71,13 +133,13 @@ def _put_step(search_id: str, step: TraceStep) -> None:
     directly, so the guarantee belongs here too.
     """
     try:
-        _get_table().put_item(Item={
+        _put_while_running(search_id, {
             "PK": f"SEARCH#{search_id}",
             "SK": f"STEP#{step.at}#{step.place_id or 'x'}",
             **step.to_item(),
             "expires_at": int(time.time()) + STEP_TTL_SECONDS,
         })
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("could not record trace step %s for %s",
                        step.tool, search_id, exc_info=True)
 
@@ -104,12 +166,23 @@ def discover_handler(event: dict, _context=None) -> dict:
 
     Output: {search_id, companies: [company dicts]} consumed by the Map state.
     """
+    if _search_stopped(event["search_id"]):
+        return {"search_id": event["search_id"], "companies": []}
     try:
         with observability.observe(
             "discovery", metadata={"radius_km": event.get("radius_km")},
             **_search_trace(event["search_id"], list(event.get("roles") or [])),
         ) as obs:
-            out = _discover(event)
+            try:
+                out = _discover(event)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in {"TransactionCanceledException", "ConditionalCheckFailedException"} \
+                        and _search_stopped(event["search_id"]):
+                    return {"search_id": event["search_id"], "companies": []}
+                raise
+            if _search_stopped(event["search_id"]):
+                return {"search_id": event["search_id"], "companies": []}
             companies = out["companies"]
             countries: dict[str, int] = {}
             for c in companies:
@@ -127,8 +200,10 @@ def _discover(event: dict) -> dict:
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET #s = :s, discovery_started_at = :t",
+        ConditionExpression="#s IN (:pending, :running)",
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "running", ":t": _now()},
+        ExpressionAttributeValues={":s": "running", ":t": _now(),
+                                   ":pending": "pending", ":running": "running"},
     )
 
     result = discover(
@@ -138,7 +213,7 @@ def _discover(event: dict) -> dict:
         roles=list(event["roles"]),  # RoleSpec dicts (or legacy plain strings)
     )
     for company in result.companies:
-        table.put_item(Item={
+        company_item = {
             "PK": f"SEARCH#{search_id}",
             "SK": f"RESULT#{company.place_id}",
             "company": company.name,
@@ -147,24 +222,30 @@ def _discover(event: dict) -> dict:
             "opportunity_type": "pending",
             "links": [],
             "emails": [],
-        })
+        }
+        actions = [{"Put": {"TableName": table.name, "Item": company_item}}]
         # Coordinates go on a separate, expiring PIN# item — see PIN_TTL_SECONDS.
         # Stored as strings to match the META lat/lng and avoid DynamoDB's
         # float/Decimal handling; get_search parses them back. A company with no
         # coordinates simply gets no pin.
         if company.lat is not None and company.lng is not None:
-            table.put_item(Item={
+            pin_item = {
                 "PK": f"SEARCH#{search_id}",
                 "SK": f"PIN#{company.place_id}",
                 "lat": str(company.lat),
                 "lng": str(company.lng),
                 "expires_at": int(time.time()) + PIN_TTL_SECONDS,
-            })
+            }
+            actions.append({"Put": {"TableName": table.name, "Item": pin_item}})
+        _write_while_running(search_id, actions)
     table.update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
         UpdateExpression="SET company_count = :c, discovery_stats = :st",
+        ConditionExpression="#s = :running",
+        ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":c": len(result.companies),
-                                   ":st": {k: str(v) for k, v in result.stats.items()}},
+                                   ":st": {k: str(v) for k, v in result.stats.items()},
+                                   ":running": "running"},
     )
     logger.info("search %s budgets: %s", search_id, config.budget_summary())
     n = len(result.companies)
@@ -186,6 +267,10 @@ def investigate_handler(event: dict, _context=None) -> dict:
     """Input (one Map item): {search_id, company: {...}}. Writes the RESULT# item."""
     search_id = event["search_id"]
     company = Company(**event["company"])
+    if _search_stopped(search_id):
+        outcome = "cancelled" if _search_cancelled(search_id) else "terminal"
+        return {"place_id": company.place_id, "opportunity_type": "pending",
+                "outcome": outcome, "error_code": ""}
     # Steps are written as they happen, so the panel fills in while the Map
     # state is still running rather than all at once at the end.
     #
@@ -193,22 +278,33 @@ def investigate_handler(event: dict, _context=None) -> dict:
     # Lambda under this search spends against one counter, so raising the number
     # of companies no longer multiplies the SerpAPI bill.
     try:
+        lambda_seconds = None
+        if _context is not None and hasattr(_context, "get_remaining_time_in_millis"):
+            lambda_seconds = max(0.0, _context.get_remaining_time_in_millis() / 1000)
         run = investigate(
             company,
-            on_step=lambda s: _put_step(search_id, s),
+            on_step=lambda s: None if _search_stopped(search_id) else _put_step(search_id, s),
             budget=DynamoSearchBudget(search_id, table=_get_table()),
             search_id=search_id,
+            should_stop=lambda: _search_stopped(search_id),
+            deadline_seconds=lambda_seconds,
         )
     finally:
         # The Lambda freezes on return; hand the spans over first (bounded).
         observability.flush()
     f = run.findings
-    _get_table().update_item(
-        Key={"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
-        UpdateExpression=("SET opportunity_type = :o, links = :l, emails = :e, "
-                          "evidence = :v, confidence = :c, agent_stats = :st, "
-                          "investigated_at = :t"),
-        ExpressionAttributeValues={
+    if run.cancelled or _search_stopped(search_id):
+        outcome = "cancelled" if _search_cancelled(search_id) else "terminal"
+        return {"place_id": company.place_id, "opportunity_type": "pending",
+                "outcome": outcome, "error_code": ""}
+    table = _get_table()
+    result_update = {"Update": {
+        "TableName": table.name,
+        "Key": {"PK": f"SEARCH#{search_id}", "SK": f"RESULT#{company.place_id}"},
+        "UpdateExpression": ("SET opportunity_type = :o, links = :l, emails = :e, "
+                             "evidence = :v, confidence = :c, agent_stats = :st, "
+                             "investigated_at = :t"),
+        "ExpressionAttributeValues": {
             ":o": f.opportunity_type.value,
             ":l": f.links,
             ":e": f.emails,
@@ -217,18 +313,31 @@ def investigate_handler(event: dict, _context=None) -> dict:
             ":st": {k: str(v) for k, v in run.stats().items()},
             ":t": _now(),
         },
-    )
+    }}
+    try:
+        _write_while_running(search_id, [result_update])
+    except ClientError as exc:
+        if (exc.response.get("Error", {}).get("Code") == "TransactionCanceledException"
+                and _search_stopped(search_id)):
+            outcome = "cancelled" if _search_cancelled(search_id) else "terminal"
+            return {"place_id": company.place_id, "opportunity_type": "pending",
+                    "outcome": outcome, "error_code": ""}
+        raise
     logger.info("search %s / %s -> %s (tools=%d web_search=%d tokens=%d/%d)",
                 search_id, company.name, f.opportunity_type.value,
                 run.tool_calls, run.metered_calls.get("web_search", 0),
                 run.input_tokens, run.output_tokens)
-    return {"place_id": company.place_id, "opportunity_type": f.opportunity_type.value}
+    return {"place_id": company.place_id, "opportunity_type": f.opportunity_type.value,
+            "outcome": "error" if run.error else "success",
+            "error_code": run.error.split(":", 1)[0] if run.error else ""}
 
 
 def aggregate_handler(event: dict, _context=None) -> dict:
     """Input: {search_id, results: [investigate outputs]}. Finalizes the search."""
     search_id = event["search_id"]
     results = event.get("results", [])
+    if _search_stopped(search_id):
+        return {"search_id": search_id, "status": _search_status(search_id), "counts": {}}
     counts: dict[str, int] = {}
     for r in results:
         counts[r["opportunity_type"]] = counts.get(r["opportunity_type"], 0) + 1
@@ -238,36 +347,76 @@ def aggregate_handler(event: dict, _context=None) -> dict:
                                "counts": counts})
     finally:
         observability.flush()
+    failures = [r for r in results if r.get("outcome") == "error"]
+    final_status = "failed" if failures and len(failures) == len(results) else (
+        "degraded" if failures else "completed"
+    )
     _get_table().update_item(
         Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-        UpdateExpression="SET #s = :s, completed_at = :t, opportunity_counts = :c",
+        UpdateExpression="SET #s = :s, completed_at = :t, opportunity_counts = :c, "
+                         "company_errors = :e",
+        ConditionExpression="#s IN (:pending, :running)",
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "completed", ":t": _now(), ":c": counts},
+        ExpressionAttributeValues={":s": final_status, ":t": _now(), ":c": counts,
+                                   ":e": len(failures), ":pending": "pending", ":running": "running"},
     )
-    logger.info("search %s completed: %s", search_id, counts)
-    return {"search_id": search_id, "counts": counts}
+    logger.info("search %s %s: %s (%d company errors)", search_id, final_status,
+                counts, len(failures))
+    return {"search_id": search_id, "counts": counts, "status": final_status,
+            "company_errors": len(failures)}
 
 
 def fail_handler(event: dict, _context=None) -> dict:
     """Catch-all: mark the search failed (wired to state machine error catch)."""
     search_id = event.get("search_id") or (event.get("input") or {}).get("search_id", "")
+    if not search_id:
+        detail = event.get("detail") or {}
+        execution_input = detail.get("input")
+        if isinstance(execution_input, str):
+            try:
+                execution_input = json.loads(execution_input)
+            except ValueError:
+                execution_input = {}
+        if isinstance(execution_input, dict):
+            search_id = execution_input.get("search_id", "")
+    detail = event.get("detail") or {}
+    raw_error = event.get("error") or {}
+    raw_name = str(raw_error.get("Error", "")) if isinstance(raw_error, dict) else ""
+    execution_status = str(detail.get("status", "")).upper()
+    if execution_status == "TIMED_OUT" or raw_name == "States.Timeout":
+        error_code, retryable = "workflow_timeout", True
+    elif execution_status == "ABORTED":
+        error_code, retryable = "workflow_aborted", False
+    elif raw_name in {"Lambda.ServiceException", "Lambda.SdkClientException"}:
+        error_code, retryable = "lambda_service_error", True
+    elif raw_name in {"States.Permissions", "AccessDeniedException"}:
+        error_code, retryable = "permission_denied", False
+    else:
+        error_code, retryable = "workflow_failed", False
     if search_id:
-        _get_table().update_item(
-            Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
-            UpdateExpression="SET #s = :s, failed_at = :t",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "failed", ":t": _now()},
-        )
+        try:
+            _get_table().update_item(
+                Key={"PK": f"SEARCH#{search_id}", "SK": "META"},
+                UpdateExpression="SET #s = :s, failed_at = :t, error_code = :ec, retryable = :r",
+                ConditionExpression="#s IN (:pending, :running)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "failed", ":t": _now(),
+                                           ":pending": "pending", ":running": "running",
+                                           ":ec": error_code, ":r": retryable},
+            )
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
     logger.error("search %s failed: %s", search_id, event.get("error"))
     if search_id:
-        # Only the error *type* from Step Functions: its Cause can carry a stack
-        # trace with request payloads in it.
-        err = event.get("error") or {}
-        error_type = str(err.get("Error", "unknown")) if isinstance(err, dict) else "unknown"
+        # Never persist Step Functions' Cause: it can contain request data or a
+        # stack trace. Store only the bounded safe code above.
         try:
             with observability.observe("search.failed", **_search_trace(search_id, [])) as obs:
-                obs.update(level="ERROR", status_message=error_type,
-                           output={"status": "failed", "error": error_type})
+                obs.update(level="ERROR", status_message=error_code,
+                           output={"status": "failed", "error_code": error_code,
+                                   "retryable": retryable})
         finally:
             observability.flush()
-    return {"search_id": search_id, "status": "failed"}
+    return {"search_id": search_id, "status": "failed", "error_code": error_code,
+            "retryable": retryable}
