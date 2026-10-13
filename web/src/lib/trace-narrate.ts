@@ -165,6 +165,24 @@ export function narrate(step: TraceStep, search: Search): string {
         : `Looked for a contact address on ${who}'s site.`;
 
     case "report":
+      if (step.tag === "checking") {
+        if (step.meta === "model stopped without a final report") {
+          return live
+            ? `${who}'s check ended before a final report — preparing one from the evidence collected.`
+            : `${who}'s check ended before a final report — prepared one from the evidence collected.`;
+        }
+        if (step.meta === "tool-call budget reached") {
+          return live
+            ? `${who}'s check reached its tool limit — summarising the evidence collected.`
+            : `${who}'s check reached its tool limit — summarised the evidence collected.`;
+        }
+        return live ? `Preparing the result for ${who}.` : `Prepared the result for ${who}.`;
+      }
+      if (step.meta.includes("check incomplete")) {
+        return step.tag === "found"
+          ? `${who}'s check is incomplete, but a verified lead is worth following up.`
+          : `${who}'s check could not finish — no verified lead to show yet.`;
+      }
       return step.tag === "found"
         ? `Done with ${who} — worth contacting.`
         : `Done with ${who} — nothing useful this time.`;

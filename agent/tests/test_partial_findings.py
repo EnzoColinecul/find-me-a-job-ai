@@ -103,15 +103,18 @@ def test_late_model_error_retains_lead_and_error_status(monkeypatch, forced):
     monkeypatch.setattr(orchestrator, "find_careers_link", lambda url: ToolResult(
         ok=True, data={"candidates": ["https://acme.example/careers"]}))
     monkeypatch.setattr(config, "MAX_TOOL_CALLS", 1 if forced else 8)
+    steps = []
     result = orchestrator.investigate(Company(
         place_id="acme", name="Acme", address="Melbourne", country_code="au",
         website="https://acme.example", roles=["chef"],
-    ))
+    ), on_step=steps.append)
     assert result.error.startswith("TimeoutError:")
     assert result.findings.opportunity_type is OpportunityType.CAREERS_PAGE
     assert result.findings.links == ["https://acme.example/careers"]
     assert result.forced_report is forced
     assert result.forced_report_reason == ("tool_budget" if forced else "")
+    assert steps[-1].tool == "report_findings"
+    assert steps[-1].meta == "verified partial lead; check incomplete"
 
 
 def test_time_budget_recovery_does_not_request_final_model_report(monkeypatch):
@@ -136,14 +139,35 @@ def test_time_budget_recovery_does_not_request_final_model_report(monkeypatch):
     monkeypatch.setattr(orchestrator, "get_provider", lambda: provider)
     monkeypatch.setattr(orchestrator, "find_careers_link", careers)
     monkeypatch.setattr(config, "MAX_TOOL_CALLS", 1)
+    steps = []
     result = orchestrator.investigate(Company(
         place_id="acme", name="Acme", address="Melbourne", country_code="au",
         website="https://acme.example", roles=["chef"],
-    ))
+    ), on_step=steps.append)
     assert result.error.startswith("TimeoutError:")
     assert result.findings.opportunity_type is OpportunityType.CAREERS_PAGE
     assert provider.calls == 2
     assert result.forced_report_reason == "time_budget"
+    assert steps[-1].meta == "verified partial lead; check incomplete"
+
+
+def test_model_failure_without_evidence_emits_incomplete_report(monkeypatch):
+    class Provider:
+        def complete(self, *args, **kwargs):
+            raise TimeoutError("provider unavailable")
+
+    monkeypatch.setattr(orchestrator, "get_provider", lambda: Provider())
+    steps = []
+    result = orchestrator.investigate(Company(
+        place_id="acme", name="Acme", address="Melbourne", country_code="au",
+        website="https://acme.example", roles=["chef"],
+    ), on_step=steps.append)
+    assert result.error.startswith("TimeoutError:")
+    assert result.findings.opportunity_type is OpportunityType.NONE
+    item = steps[-1].to_item()
+    assert item["tool"] == "report"
+    assert item["tag"] == "skipping"
+    assert item["meta"] == "check incomplete; no verified lead"
 
 
 def test_cancellation_during_failed_request_does_not_recover_leads(monkeypatch):

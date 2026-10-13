@@ -862,8 +862,11 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
         if downgraded:
             emit(Tag.SKIPPING, "role_match", downgraded[:60])
             obs.event("report.downgraded", level="WARNING", status_message=downgraded)
-        emit(Tag.FOUND if run.findings.opportunity_type is not OpportunityType.NONE else Tag.SKIPPING,
-             "report_findings", run.findings.opportunity_type.value.replace("_", " "))
+        has_finding = run.findings.opportunity_type is not OpportunityType.NONE
+        report_meta = ("verified partial lead; check incomplete" if has_finding
+                       else "check incomplete; no verified lead") if run.error else (
+                           run.findings.opportunity_type.value.replace("_", " "))
+        emit(Tag.FOUND if has_finding else Tag.SKIPPING, "report_findings", report_meta)
     except Exception as exc:
         if _stopped():
             run.cancelled = True
@@ -873,8 +876,10 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
         run.error = f"{type(exc).__name__}: {exc}"[:200]
         emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")
         run.findings = _recover_observed_findings(run, "model or tool request failed before final report")
-        if run.findings.opportunity_type is not OpportunityType.NONE:
-            emit(Tag.FOUND, "report_findings", "verified partial lead; check incomplete")
+        has_finding = run.findings.opportunity_type is not OpportunityType.NONE
+        emit(Tag.FOUND if has_finding else Tag.SKIPPING, "report_findings",
+             "verified partial lead; check incomplete" if has_finding
+             else "check incomplete; no verified lead")
     finally:
         reset_deadline(deadline_token)
     run.seconds = time.monotonic() - start
