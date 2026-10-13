@@ -35,7 +35,7 @@ def test_every_label_names_a_tool_we_actually_run() -> None:
     # `role_match` is not a model-callable tool but it IS a real call the agent
     # makes — an LLM judging vacancy titles against the role — and it gets its
     # own row when it rejects a claim, so it belongs here.
-    known = set(dispatch) | {"discovery", "triage", "report_findings", "role_match"}
+    known = set(dispatch) | {"discovery", "triage", "agent.turn", "report_findings", "role_match"}
     assert set(TOOL_LABELS) == known
     assert "places.details" not in TOOL_LABELS.values()
 

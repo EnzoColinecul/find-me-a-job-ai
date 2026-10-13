@@ -29,6 +29,7 @@ class Tag(str, Enum):
 TOOL_LABELS: dict[str, str] = {
     "discovery": "places.nearby",
     "triage": "triage",
+    "agent.turn": "analysis",
     "fetch_url": "fetch_page",
     "find_careers_link": "extract_jobs",
     "search_jobs_adzuna": "extract_jobs",

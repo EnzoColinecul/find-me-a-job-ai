@@ -115,6 +115,9 @@ def test_late_model_error_retains_lead_and_error_status(monkeypatch, forced):
     assert result.forced_report_reason == ("tool_budget" if forced else "")
     assert steps[-1].tool == "report_findings"
     assert steps[-1].meta == "verified partial lead; check incomplete"
+    errors = [step for step in steps if step.meta.startswith("error:")]
+    if not forced:
+        assert errors[0].tool == "agent.turn"
 
 
 def test_time_budget_recovery_does_not_request_final_model_report(monkeypatch):

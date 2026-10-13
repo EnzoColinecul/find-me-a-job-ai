@@ -623,6 +623,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
     run = AgentRun(findings=Findings(opportunity_type=OpportunityType.NONE),
                    company_id=company.place_id)
     dispatch = _dispatch_for(company)
+    active_operation = "triage"
     start = time.monotonic()
     max_calls = config.MAX_TOOL_CALLS or float("inf")
     max_seconds = config.MAX_SECONDS or float("inf")
@@ -683,6 +684,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
         # so overriding the budget is a one-line change in one place (and tests
         # can patch it). 0 = unlimited — see config.py for the arithmetic.
         while run.tool_calls < max_calls and (time.monotonic() - start) < max_seconds:
+            active_operation = "agent.turn"
             turn = provider.complete(_SYSTEM, messages, model=_model(), max_tokens=1024,
                                      purpose="agent.turn")
             if _stopped():
@@ -705,6 +707,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                     run.seconds = time.monotonic() - start
                     return run
                 run.trace.append(f"{tu.name}({tu.input})")
+                active_operation = tu.name
                 if tu.name == "report_findings":
                     findings, downgraded = _verify(
                         _findings_from_report(tu.input), run, company.roles
@@ -874,7 +877,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
             return run
         logger.exception("agent failed for %s", company.name)
         run.error = f"{type(exc).__name__}: {exc}"[:200]
-        emit(Tag.SKIPPING, "triage", f"error: {type(exc).__name__}")
+        emit(Tag.SKIPPING, active_operation, f"error: {type(exc).__name__}")
         run.findings = _recover_observed_findings(run, "model or tool request failed before final report")
         has_finding = run.findings.opportunity_type is not OpportunityType.NONE
         emit(Tag.FOUND if has_finding else Tag.SKIPPING, "report_findings",
