@@ -73,12 +73,12 @@ ASSET_EXCLUDE = [
 
 BUNDLE_CMD = (
     "set -e && "
-    "pip install --no-cache-dir --target /asset-output "
+    "pip install --no-cache-dir --require-hashes --only-binary=:all: "
+    "--timeout 60 --retries 3 --target /asset-output "
     "-r /asset-input/api/requirements-lambda.txt && "
     "cp -r /asset-input/api/app /asset-output/ && "
     "cp -r /asset-input/agent/src/fmaj_agent /asset-output/ && "
-    # Arch check only — importing the app needs boto3 (runtime-provided, absent at
-    # build time), so validate the compiled wheel instead, exactly as Pipeline does.
+    # Validate the compiled wheel against the target architecture.
     "PYTHONPATH=/asset-output python -c "
     "'import pydantic_core._pydantic_core; print(\"api bundle arch OK\")'"
 )

@@ -34,6 +34,15 @@ from fmaj.config import StageConfig
 from fmaj.stacks.data_stack import DataStack
 
 AGENT_PATH = "../agent"
+BUNDLE_CMD = (
+    "set -e && "
+    "pip install --no-cache-dir --require-hashes --only-binary=:all: "
+    "--timeout 60 --retries 3 --target /asset-output "
+    "-r /asset-input/requirements-lambda.txt && "
+    "cp -r /asset-input/src/fmaj_agent /asset-output/ && "
+    "PYTHONPATH=/asset-output python -c "
+    "'import pydantic_core._pydantic_core; print(\"bundle arch OK\")'"
+)
 MAP_CONCURRENCY = 5
 
 
@@ -56,14 +65,6 @@ class PipelineStack(cdk.Stack):
         # the target arch (emulated on Apple Silicon — slower but correct).
         # The final import check fails the build loudly instead of shipping a broken
         # bundle that only errors at Lambda cold start.
-        bundle_cmd = (
-            "set -e && "
-            "pip install --no-cache-dir --target /asset-output "
-            "-r /asset-input/requirements-lambda.txt && "
-            "cp -r /asset-input/src/fmaj_agent /asset-output/ && "
-            "PYTHONPATH=/asset-output python -c "
-            "'import pydantic_core._pydantic_core; print(\"bundle arch OK\")'"
-        )
         code = lambda_.Code.from_asset(
             AGENT_PATH,
             exclude=[".venv", "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache",
@@ -71,7 +72,7 @@ class PipelineStack(cdk.Stack):
             bundling=BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_12.bundling_image,
                 platform="linux/amd64",  # match Lambda architecture
-                command=["bash", "-c", bundle_cmd],
+                command=["bash", "-c", BUNDLE_CMD],
             ),
         )
 
