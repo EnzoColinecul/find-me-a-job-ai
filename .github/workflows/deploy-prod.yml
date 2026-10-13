@@ -1,6 +1,6 @@
 name: Deploy Prod
 
-# Manual only: Actions tab -> "Deploy Prod" -> Run workflow.
+# Manual only: Actions tab -> "Deploy Prod" -> Run workflow from main.
 # This is the deliberate human gate for production (no paid GitHub plan needed).
 # Auth to AWS via OIDC (no stored keys); assumes find-me-a-job-ai_oidc-policy.
 
@@ -30,10 +30,14 @@ env:
 
 jobs:
   deploy-prod:
+    # The dispatch branch selects the workflow; the ref input selects the tested
+    # commit. Gate the former independently, before any job/OIDC credentials.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify confirmation
         env:
+          # Keep untrusted input as data, never interpolate it into the script.
           CONFIRM: ${{ github.event.inputs.confirm }}
         run: |
           if [ "$CONFIRM" != "deploy" ]; then
