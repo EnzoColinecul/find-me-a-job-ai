@@ -158,9 +158,11 @@ class AgentRun:
     #: True once any fetched page invited applications ("send us your resume",
     #: "we're hiring"). It is what lets a generic `info@` count as a lead.
     saw_hiring_signal: bool = False
-    #: True when the run ended in `_force_report` (tool-call or time budget hit).
+    #: True when a missing final report required a forced report or recovery.
     #: Observability only — not part of `stats()`, whose shape is persisted.
     forced_report: bool = False
+    #: The actual reason: model_termination, tool_budget, or time_budget.
+    forced_report_reason: str = ""
     #: Cooperative stop observed between bounded provider/tool calls.
     cancelled: bool = False
 
@@ -586,6 +588,7 @@ def _record_outcome(obs, run: AgentRun) -> None:
             "links": len(f.links),
             "emails": len(f.emails),
             "forced_report": run.forced_report,
+            "forced_report_reason": run.forced_report_reason,
             "error": run.error or None,
         },
         metadata={
@@ -595,13 +598,22 @@ def _record_outcome(obs, run: AgentRun) -> None:
             "output_tokens": run.output_tokens,
             "seconds": round(run.seconds, 2),
             "forced_report": run.forced_report,
+            "forced_report_reason": run.forced_report_reason,
             "outcome": "error" if run.error else f.opportunity_type.value,
         },
     )
     if run.error:
         obs.error(run.error)
     elif run.forced_report:
-        obs.update(level="WARNING", status_message="budget reached; report was forced")
+        obs.update(level="WARNING", status_message=_report_reason(run))
+
+
+def _report_reason(run: AgentRun) -> str:
+    return {
+        "model_termination": "model stopped without a final report",
+        "tool_budget": "tool-call budget reached",
+        "time_budget": "time budget reached",
+    }.get(run.forced_report_reason, "final report required")
 
 
 def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | None,
@@ -824,18 +836,27 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
                 return run
 
         run.forced_report = True
+        report_deadline_reached = time.monotonic() >= start + max(max_seconds - 3.0, 0.0)
+        run.forced_report_reason = (
+            "time_budget" if report_deadline_reached
+            else "tool_budget" if run.tool_calls >= max_calls
+            else "model_termination"
+        )
         obs.event(
-            "budget.breach", level="WARNING",
+            "agent.missing_report" if run.forced_report_reason == "model_termination" else "budget.breach",
+            level="WARNING",
             metadata={"tool_calls": run.tool_calls,
                       "seconds": round(time.monotonic() - start, 1),
                       "max_tool_calls": config.MAX_TOOL_CALLS,
-                      "max_seconds": config.MAX_SECONDS},
-            status_message="tool-call or time budget reached; forcing report_findings",
+                      "max_seconds": config.MAX_SECONDS,
+                      "reason": run.forced_report_reason},
+            status_message=_report_reason(run),
         )
-        if time.monotonic() >= start + max(max_seconds - 3.0, 0.0):
+        if report_deadline_reached:
             run.error = "TimeoutError: company time budget exhausted before final report"
             forced = _recover_observed_findings(run, "time budget exhausted before final report")
         else:
+            emit(Tag.CHECKING, "report_findings", _report_reason(run))
             forced = _force_report(provider, messages, run)
         run.findings, downgraded = _verify(forced, run, company.roles)
         if downgraded:
@@ -863,7 +884,7 @@ def _investigate(company: Company, on_step: StepSink, budget: SearchBudget | Non
 def _force_report(provider, messages: list[dict], run: AgentRun) -> Findings:
     """Force report_findings so we always end with structured output."""
     messages.append({"role": "user", "text":
-        "Budget reached. Call report_findings now with what you found so far."})
+        f"{_report_reason(run)}. Call report_findings now with what you found so far."})
     try:
         turn = provider.complete(_SYSTEM, messages, model=_model(),
                                  force_tool="report_findings", max_tokens=512,

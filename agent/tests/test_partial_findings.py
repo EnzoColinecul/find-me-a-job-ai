@@ -111,6 +111,7 @@ def test_late_model_error_retains_lead_and_error_status(monkeypatch, forced):
     assert result.findings.opportunity_type is OpportunityType.CAREERS_PAGE
     assert result.findings.links == ["https://acme.example/careers"]
     assert result.forced_report is forced
+    assert result.forced_report_reason == ("tool_budget" if forced else "")
 
 
 def test_time_budget_recovery_does_not_request_final_model_report(monkeypatch):
@@ -142,6 +143,7 @@ def test_time_budget_recovery_does_not_request_final_model_report(monkeypatch):
     assert result.error.startswith("TimeoutError:")
     assert result.findings.opportunity_type is OpportunityType.CAREERS_PAGE
     assert provider.calls == 2
+    assert result.forced_report_reason == "time_budget"
 
 
 def test_cancellation_during_failed_request_does_not_recover_leads(monkeypatch):
