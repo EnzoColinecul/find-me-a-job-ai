@@ -11,6 +11,7 @@
 cases:
   # ── Big employers with well-known careers presence (strict) ──
   - name: Merivale
+    country_code: au
     website: https://merivale.com
     types: [restaurant, bar]
     roles: [chef]
@@ -18,48 +19,56 @@ cases:
     note: Large Sydney hospitality group, careers section well established.
 
   - name: The Grounds of Alexandria
+    country_code: au
     website: https://thegrounds.com.au
     types: [restaurant, cafe]
     roles: [barista]
     accept: [careers_page, job_listing]
 
   - name: Guzman y Gomez
+    country_code: au
     website: https://www.guzmanygomez.com.au
     types: [restaurant, meal_takeaway]
     roles: [kitchen hand]
     accept: [careers_page, job_listing]
 
   - name: Grill'd
+    country_code: au
     website: https://www.grilld.com.au
     types: [restaurant]
     roles: [kitchen hand]
     accept: [careers_page, job_listing]
 
   - name: Woolworths
+    country_code: au
     website: https://www.woolworths.com.au
     types: [supermarket]
     roles: [supermarket assistant]
     accept: [careers_page, job_listing]
 
   - name: Coles
+    country_code: au
     website: https://www.coles.com.au
     types: [supermarket]
     roles: [retail assistant]
     accept: [careers_page, job_listing]
 
   - name: JB Hi-Fi
+    country_code: au
     website: https://www.jbhifi.com.au
     types: [electronics_store]
     roles: [retail assistant]
     accept: [careers_page, job_listing]
 
   - name: Bunnings Warehouse
+    country_code: au
     website: https://www.bunnings.com.au
     types: [hardware_store]
     roles: [retail assistant]
     accept: [careers_page, job_listing]
 
   - name: Swissôtel Sydney
+    country_code: au
     website: https://www.swissotelsydney.com.au
     types: [hotel, restaurant]
     roles: [chef]
@@ -67,6 +76,7 @@ cases:
     note: Accor group — careers likely on careers.accor.com.
 
   - name: Solotel
+    country_code: au
     website: https://solotel.com.au
     types: [bar, restaurant]
     roles: [bartender]
@@ -74,6 +84,7 @@ cases:
 
   # ── Smaller businesses (verified or looser) ──
   - name: Single O Surry Hills
+    country_code: au
     website: https://singleo.com.au
     types: [cafe, coffee_shop]
     roles: [barista]
@@ -81,12 +92,14 @@ cases:
     note: Verified 2026-07-31 -> hr@singleo.com.au (no live listing/careers page then).
 
   - name: Bourke Street Bakery
+    country_code: au
     website: https://bourkestreetbakery.com.au
     types: [bakery]
     roles: [barista]
     accept: [careers_page, job_listing, contact_email]
 
   - name: Lune Croissanterie
+    country_code: au
     website: https://www.lunecroissanterie.com
     types: [bakery]
     roles: [kitchen hand]
@@ -94,6 +107,7 @@ cases:
 
   # ── Honesty checks ──
   - name: Quantum Croissant Emporium 9843
+    country_code: au
     website: null
     types: [bakery]
     roles: [barista]
@@ -111,6 +125,7 @@ cases:
   # 2026-09-03 -> 1 vacancy, "Product Manager" (was 3 in August). If they ever
   # post an actual developer role this case flips and should be re-labelled.
   - name: Virtual IT Group
+    country_code: au
     website: https://virtualitgroup.com.au
     types: []
     roles: [software developer]

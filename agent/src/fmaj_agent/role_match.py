@@ -181,7 +181,7 @@ def _judge(titles: list[str], roles: list[str]) -> list[TitleVerdict] | None:
             # limit returns empty text and nothing to parse (see interpret.py).
             max_tokens=2048, json_mode=True, purpose="role_match",
         )
-    except Exception:  # noqa: BLE001 — a flaky judge must not fail the company
+    except Exception:
         logger.warning("role match judge failed for %s", roles, exc_info=True)
         return None
     verdicts = _parse(turn.text)
@@ -324,6 +324,6 @@ def observed_titles(name: str, result: ToolResult | None) -> list[str]:
         return list(data.get("job_titles") or [])
     if name == "search_jobs_adzuna":
         return [str(j.get("title") or "") for j in (data.get("jobs") or [])]
-    if name == "web_search":
-        return [str(r.get("title") or "") for r in (data.get("results") or [])]
+    if name == "fetch_url":
+        return [str(v.get("title") or "") for v in (data.get("vacancies") or [])]
     return []

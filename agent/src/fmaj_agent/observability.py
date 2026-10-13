@@ -17,7 +17,7 @@ process opens its top-level observation inside that trace.
     │   ├── tool.<name>                        tool   (one per tool call)
     │   │   └── role_match                     generation (when a gate judges titles)
     │   ├── budget.denied / report.downgraded  event
-    │   └── forced_report                      generation (budget breach)
+    │   └── forced_report                      generation (budget or missing report)
     └── aggregate | search.failed              span
 
 Generations are recorded in ONE place — `providers.Provider.complete` — so the

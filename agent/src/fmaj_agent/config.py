@@ -1,5 +1,6 @@
 """Runtime config for the agent — stage-aware secret names, region, budgets."""
 
+import math
 import os
 
 STAGE = os.environ.get("FMAJ_STAGE", "test")
@@ -27,6 +28,15 @@ def _ratio(name: str, default: float) -> float:
     return value if 0.0 < value <= 1.0 else default
 
 
+def _timeout(name: str, default: float) -> float:
+    """A finite positive request timeout; zero must not disable this guard."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
 PLACES_KEY_SECRET = f"fmaj/{STAGE}/places-key"
 ADZUNA_SECRET = f"fmaj/{STAGE}/adzuna"
 WEB_SEARCH_SECRET = f"fmaj/{STAGE}/web-search-key"  # SerpAPI
@@ -48,6 +58,9 @@ TRIAGE_MODEL = os.environ.get("FMAJ_TRIAGE_MODEL", "au.anthropic.claude-haiku-4-
 GEMINI_MODEL = os.environ.get("FMAJ_GEMINI_MODEL", "gemini-3.6-flash")
 VERTEX_PROJECT = os.environ.get("FMAJ_VERTEX_PROJECT", "project-7187e8cf-43d5-451b-be4")
 VERTEX_LOCATION = os.environ.get("FMAJ_VERTEX_LOCATION", "global")
+# Gemini reasoning/tool turns regularly exceed 10 seconds. Each request still
+# uses the smaller of this cap and the company's remaining wall-clock budget.
+MODEL_CALL_SECONDS = _timeout("FMAJ_MODEL_CALL_SECONDS", 30.0)
 
 # ── Per-search budgets ────────────────────────────────────
 # These exist because SerpAPI's free tier is ~250 searches/MONTH, and that is the
@@ -112,5 +125,6 @@ def budget_summary() -> dict:
         "max_web_searches_per_search": MAX_WEB_SEARCHES_PER_SEARCH or "unlimited",
         "max_tool_calls": MAX_TOOL_CALLS or "unlimited",
         "max_seconds": MAX_SECONDS or "unlimited",
+        "model_call_seconds": MODEL_CALL_SECONDS,
         "web_searches_per_search": effective or "unlimited",
     }

@@ -1,8 +1,24 @@
 """Tool tests with mocked HTTP (respx). Tools must never raise."""
 import httpx
+import pytest
 import respx
 
 from fmaj_agent.tools import impl
+
+
+@pytest.fixture(autouse=True)
+def _allow_mocked_test_hosts(monkeypatch):
+    """All HTTP destinations here are intercepted by respx; DNS is synthetic."""
+    monkeypatch.setattr(impl, "_safe_destination", lambda _url: (True, ""))
+    monkeypatch.setattr(impl, "_public_addresses", lambda _url: ["8.8.8.8"])
+    monkeypatch.setattr(
+        impl,
+        "_send_pinned_request",
+        lambda method, url, _addresses, timeout: getattr(httpx, method.lower())(
+            url, headers={"User-Agent": impl.USER_AGENT}, timeout=timeout,
+            follow_redirects=False,
+        ),
+    )
 
 
 @respx.mock
@@ -16,6 +32,23 @@ def test_fetch_url_extracts_text() -> None:
     r = impl.fetch_url("https://robots.example/")
     assert r.ok
     assert "hiring" in r.data["text"].lower()
+
+
+@respx.mock
+def test_fetch_url_extracts_jobposting_title_with_page_provenance() -> None:
+    respx.get("https://jobs.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://jobs.example/careers").mock(return_value=httpx.Response(
+        200,
+        html='''<script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"JobPosting",
+         "title":"Senior Chef","url":"https://jobs.example/private/123"}
+        </script>''',
+    ))
+    result = impl.fetch_url("https://jobs.example/careers")
+    assert result.ok
+    assert result.data["vacancies"] == [
+        {"title": "Senior Chef", "url": "https://jobs.example/careers"}
+    ]
 
 
 @respx.mock
@@ -82,6 +115,25 @@ def test_adzuna_parses_results(monkeypatch) -> None:
     )
     r = impl.search_jobs_adzuna("Cafe X", "chef", country_code="au")
     assert r.ok and r.data["jobs"][0]["title"] == "Chef"
+
+
+@respx.mock
+def test_adzuna_keeps_only_the_bound_employer_and_marks_location_uncertain(monkeypatch) -> None:
+    monkeypatch.setenv("FMAJ_ADZUNA_APP_ID", "id")
+    monkeypatch.setenv("FMAJ_ADZUNA_APP_KEY", "key")
+    respx.get(url__startswith="https://api.adzuna.com/v1/api/jobs/au/search/1").mock(
+        return_value=httpx.Response(200, json={"results": [
+            {"title": "Chef", "company": {"display_name": "Cafe X Pty Ltd"},
+             "location": {"display_name": "Sydney"}, "redirect_url": "https://adzuna/job/1"},
+            {"title": "Chef", "company": {"display_name": "Cafe Y"},
+             "location": {"display_name": "Melbourne"}, "redirect_url": "https://adzuna/job/2"},
+        ]})
+    )
+    result = impl.search_jobs_adzuna("Cafe X", "chef", country_code="au",
+                                    location_context="Melbourne VIC")
+    assert result.ok
+    assert [job["company"] for job in result.data["jobs"]] == ["Cafe X Pty Ltd"]
+    assert result.data["jobs"][0]["location_uncertain"] is True
 
 
 @respx.mock
@@ -285,7 +337,7 @@ def test_extract_emails_flags_a_page_that_invites_applications() -> None:
 
 def test_hiring_invitation_needs_a_phrase_not_a_keyword() -> None:
     """A "Careers" nav item is not an invitation; "send us your resume" is."""
-    match = lambda t: bool(impl.HIRING_INVITATION.search(t))  # noqa: E731
+    match = lambda t: bool(impl.HIRING_INVITATION.search(t))
     assert match("please send us your resume")
     assert match("We are currently hiring for several roles")
     assert match("View our current vacancies")

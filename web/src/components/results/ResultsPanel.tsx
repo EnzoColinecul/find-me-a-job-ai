@@ -129,7 +129,7 @@ export default function ResultsPanel({
   // The report is a snapshot of a finished search with something in it — no
   // point offering a PDF of a run that's still moving or turned up nothing.
   const canDownload =
-    (search.status === "completed" || search.status === "cancelled") &&
+    (search.status === "completed" || search.status === "degraded" || search.status === "cancelled") &&
     found.length > 0;
 
   // Numbering runs across the whole column so a card's number is stable

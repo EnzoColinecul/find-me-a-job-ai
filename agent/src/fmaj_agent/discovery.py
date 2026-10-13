@@ -15,8 +15,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from fmaj_agent import config, mapping
-from fmaj_agent.models import Company, RoleSpec
 from fmaj_agent import places as places_mod
+from fmaj_agent.models import Company, RoleSpec
 from fmaj_agent.places import PlacesClient
 
 logger = logging.getLogger(__name__)

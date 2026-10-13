@@ -5,6 +5,7 @@ signature is checked against the pool's JWKS; issuer, audience and token_use are
 validated. Returns the authenticated user on success.
 """
 from functools import lru_cache
+from typing import Annotated
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -39,7 +40,7 @@ def _issuer() -> str:
 
 
 def require_user(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> AuthUser:
     if creds is None or not creds.credentials:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
@@ -50,7 +51,11 @@ def require_user(
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=settings.cognito_client_id,
+            audience=[
+                client_id.strip()
+                for client_id in settings.cognito_client_id.split(",")
+                if client_id.strip()
+            ],
             issuer=_issuer(),
             options={"require": ["exp", "iat", "sub"]},
         )

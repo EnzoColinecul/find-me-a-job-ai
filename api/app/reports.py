@@ -98,7 +98,7 @@ def _classify_kind(host: str, path: str) -> str:
     if "indeed." in host:
         if p.startswith("/cmp/"):
             return "company_profile"
-        if p.startswith("/viewjob") or p.startswith("/rc/clk"):
+        if p.startswith(("/viewjob", "/rc/clk")):
             return "live_listing"
         return "board_search"
     if "adzuna." in host:
@@ -188,7 +188,7 @@ def _grouped(results: list[dict]) -> list[tuple[str, list[dict]]]:
 
 
 class _Report(FPDF):
-    def footer(self) -> None:  # noqa: D401 — fpdf2 hook
+    def footer(self) -> None:
         self.set_y(-14)
         self.set_draw_color(*LINE)
         self.set_line_width(0.2)
@@ -226,7 +226,7 @@ def _title_block(pdf: _Report, search: dict) -> None:
     pdf.cell(0, 6, _t("Find Me A Job AI"), align="L")
     pdf.set_font("Helvetica", size=9)
     pdf.set_text_color(*MUTED)
-    when = datetime.now(timezone.utc).strftime("%d %b %Y")
+    when = datetime.now(timezone.utc).strftime("%d %b %Y")  # noqa: UP017 — Python 3.10 tooling compatibility
     pdf.cell(0, 6, _t(when), align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
@@ -370,6 +370,14 @@ def build_pdf(search: dict) -> bytes:
     pdf.set_title(_t("Find Me A Job AI — job search report"))
     pdf.add_page()
     _title_block(pdf, search)
+    if search.get("status") == "degraded":
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(*MUTED)
+        count = int(search.get("company_errors", 0) or 0)
+        pdf.multi_cell(0, 5, _t(
+            f"Partial search: {count} compan{'y' if count == 1 else 'ies'} could not be checked."
+        ))
+        pdf.ln(2)
 
     groups = _grouped(search.get("results", []))
     if not any(items for _, items in groups):
@@ -389,7 +397,7 @@ def build_pdf(search: dict) -> bytes:
 
 
 # ── S3 storage + presigning ──────────────────────────────────────────────────
-_TERMINAL = frozenset({"completed", "cancelled"})
+_TERMINAL = frozenset({"completed", "degraded", "cancelled"})
 _PRESIGN_TTL = 3600  # 1 hour is plenty for a click-through download
 
 _s3 = None
@@ -445,7 +453,7 @@ def get_report_url(sub: str, search_id: str) -> dict | None:
                 io.BytesIO(pdf), bucket, key,
                 ExtraArgs={"ContentType": "application/pdf"},
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("failed to build/upload report for %s", search_id)
             raise
 

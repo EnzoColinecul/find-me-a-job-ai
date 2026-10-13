@@ -7,7 +7,8 @@ generic web OAuth clients). Its outputs must exist BEFORE deploying this stack:
 See docs/google-login-setup.md.
 """
 import aws_cdk as cdk
-from aws_cdk import aws_cognito as cognito, aws_ssm as ssm
+from aws_cdk import aws_cognito as cognito
+from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 from fmaj.config import StageConfig
@@ -75,6 +76,23 @@ class AuthStack(cdk.Stack):
         )
         # hosted UI only shows Google once the IdP exists
         self.client.node.add_dependency(google_idp)
+
+        # A separate test-only client lets GitHub Actions mint a short-lived token
+        # for the authenticated API smoke. Keep the public Google PKCE client above
+        # unchanged; no password-auth client is created in production.
+        if config.stage == "test":
+            self.smoke_client = self.user_pool.add_client(
+                "SmokeTestClient",
+                user_pool_client_name="fmaj-test-smoke",
+                generate_secret=False,
+                auth_flows=cognito.AuthFlow(user_password=True),
+                prevent_user_existence_errors=True,
+            )
+            cdk.CfnOutput(
+                self,
+                "SmokeTestClientId",
+                value=self.smoke_client.user_pool_client_id,
+            )
 
         cdk.CfnOutput(self, "UserPoolId", value=self.user_pool.user_pool_id)
         cdk.CfnOutput(self, "UserPoolClientId", value=self.client.user_pool_client_id)

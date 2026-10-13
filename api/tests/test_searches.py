@@ -1,8 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from threading import Lock
+from types import SimpleNamespace
+
 import pytest
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
-import app.searches as searches
+from app import searches
 from app.searches import QuotaExhausted, SearchRequest
 
 
@@ -11,15 +16,16 @@ class FakeTable:
 
     def __init__(self) -> None:
         self.store: dict = {}
+        self.meta = SimpleNamespace(client=FakeDynamoClient(self))
 
-    def put_item(self, Item, ConditionExpression=None):  # noqa: N803
+    def put_item(self, Item, ConditionExpression=None):
         self.store[(Item["PK"], Item["SK"])] = Item
 
-    def get_item(self, Key):  # noqa: N803
+    def get_item(self, Key, ConsistentRead=False):
         item = self.store.get((Key["PK"], Key["SK"]))
         return {"Item": item} if item else {}
 
-    def update_item(  # noqa: N803
+    def update_item(
         self,
         Key,
         UpdateExpression,
@@ -41,10 +47,29 @@ class FakeTable:
         # implementation to keep correct, and these are the only three shapes
         # the app ever sends.
         if ConditionExpression is not None:
-            if "free_search_used" in ConditionExpression:
-                if item is None or item.get("free_search_used") is not False:
+            if "#s IN" in ConditionExpression:
+                if item is None or item.get("status") not in {values[":pending"], values[":running"]}:
                     _reject()
-                item["free_search_used"] = True
+                for clause in UpdateExpression.removeprefix("SET ").split(","):
+                    attr, _, placeholder = clause.strip().partition(" = ")
+                    item[names.get(attr, attr)] = values[placeholder.strip()]
+                return
+
+            if "active_search_id" in ConditionExpression:
+                if item is None or item.get("active_search_id") != values[":sid"]:
+                    _reject()
+                item["active_since"] = values[":none"]
+                item["active_search_id"] = values[":none"]
+                return
+
+            if "free_search_used" in ConditionExpression:
+                expected_placeholder = ":" + ConditionExpression.rsplit(":", 1)[1].strip()
+                expected = values[expected_placeholder]
+                if item is None or item.get("free_search_used") is not expected:
+                    _reject()
+                target_placeholder = ":" + UpdateExpression.rsplit(":", 1)[1].strip()
+                item["free_search_used"] = values[target_placeholder]
+                return
                 return
 
             if "active_since" in ConditionExpression:
@@ -82,7 +107,7 @@ class FakeTable:
             attr, _, placeholder = clause.strip().partition(" = ")
             item[names.get(attr, attr)] = ExpressionAttributeValues[placeholder.strip()]
 
-    def query(  # noqa: N803
+    def query(
         self,
         KeyConditionExpression,
         ExpressionAttributeValues=None,
@@ -110,6 +135,66 @@ class FakeTable:
         return {"Items": items}
 
 
+class FakeDynamoClient:
+    """Resource client fake: native values and all-or-nothing reservations."""
+
+    def __init__(self, table):
+        self.table = table
+        self.lock = Lock()
+
+    def transact_write_items(self, TransactItems, ClientRequestToken=None):
+        with self.lock:
+            self._apply_transaction(TransactItems)
+
+    def _apply_transaction(self, TransactItems):
+        staged = deepcopy(self.table.store)
+
+        def reject():
+            raise ClientError(
+                {"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems"
+            )
+
+        for action in TransactItems:
+            if "Update" in action:
+                update = action["Update"]
+                key = update["Key"]
+                identity = (key["PK"], key["SK"])
+                item = staged.get(identity)
+                values = update["ExpressionAttributeValues"]
+                if "free_search_used" in update["ConditionExpression"]:
+                    if item is None or item.get("free_search_used") is not values[":unused"]:
+                        reject()
+                    active_matches = (
+                        ("active_since" not in item and "active_search_id" not in item)
+                        or (item.get("active_since") == values[":expected_since"]
+                            and ("active_search_id" not in item
+                                 or item.get("active_search_id") == values[":expected_id"]))
+                    )
+                    if not active_matches:
+                        reject()
+                    item.update({
+                        "free_search_used": values[":used"],
+                        "active_since": values[":now"],
+                        "active_search_id": values[":sid"],
+                    })
+                else:
+                    count = (item or {}).get("count", 0)
+                    if count >= values[":cap"]:
+                        reject()
+                    if item is None:
+                        item = {**key}
+                        staged[identity] = item
+                    item["count"] = count + values[":one"]
+            else:
+                put = action["Put"]
+                item = deepcopy(put["Item"])
+                identity = (item["PK"], item["SK"])
+                if identity in staged:
+                    reject()
+                staged[identity] = item
+        self.table.store = staged
+
+
 @pytest.fixture()
 def table(monkeypatch):
     fake = FakeTable()
@@ -125,7 +210,7 @@ def _user(table, sub="u1", used=False):
     }
 
 
-VALID = dict(lat=-33.87, lng=151.21, radius_km=5, roles=["chef"])
+VALID = {"lat": -33.87, "lng": 151.21, "radius_km": 5, "roles": ["chef"]}
 
 
 @pytest.mark.parametrize(
@@ -193,6 +278,30 @@ def test_create_search_consumes_quota(table) -> None:
     assert table.store[("USER#u1", "PROFILE")]["free_search_used"] is True
 
 
+def test_idempotency_key_returns_the_original_search_without_spending_again(table) -> None:
+    _user(table)
+    first = searches.create_search("u1", SearchRequest(**VALID), "request-key-001")
+    again = searches.create_search("u1", SearchRequest(**VALID), "request-key-001")
+    assert again["search_id"] == first["search_id"]
+    assert table.store[("USER#u1", "PROFILE")]["free_search_used"] is True
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
+
+
+def test_reservation_transaction_persists_all_search_records_together(table) -> None:
+    _user(table)
+    meta = searches.create_search("u1", SearchRequest(**VALID), "transaction-key-001")
+    search_id = meta["search_id"]
+    profile = table.store[("USER#u1", "PROFILE")]
+    assert profile["free_search_used"] is True
+    assert profile["active_search_id"] == search_id
+    assert table.store[(f"SEARCH#{search_id}", "META")]["execution_start_state"] == "pending"
+    assert any(pk == "USER#u1" and sk.startswith("SEARCH#")
+               for pk, sk in table.store)
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
+    key_hash = searches.hashlib.sha256(b"transaction-key-001").hexdigest()
+    assert table.store[("USER#u1", f"IDEMPOTENCY#{key_hash}")]["search_id"] == search_id
+
+
 def _finish(table, search_id, status="completed"):
     """Mark a search terminal, as the pipeline would. Frees the concurrency lease."""
     table.store[(f"SEARCH#{search_id}", "META")]["status"] = status
@@ -214,6 +323,31 @@ def test_concurrent_search_rejected_while_first_runs(table) -> None:
     table.store[("USER#u1", "PROFILE")]["free_search_used"] = False
     with pytest.raises(searches.SearchInProgress):
         searches.create_search("u1", SearchRequest(**VALID))
+
+
+def test_simultaneous_reservations_commit_only_one_search(table, monkeypatch) -> None:
+    _user(table)
+    # Model two requests that both read the same empty lease before either
+    # reaches DynamoDB's transaction boundary.
+    monkeypatch.setattr(searches, "_check_search_lease", lambda _sub: ("", ""))
+
+    def create():
+        try:
+            return searches.create_search("u1", SearchRequest(**VALID))
+        except (searches.SearchInProgress, searches.QuotaExhausted,
+                searches.MonthlyCapReached) as exc:  # collect the loser for a stable assertion
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: create(), range(2)))
+    successes = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+    errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    assert len(successes) == 1
+    assert len(errors) == 1 and isinstance(errors[0], searches.SearchInProgress)
+    assert table.store[("SYSTEM#QUOTA", f"MONTH#{searches._month_key()}")]["count"] == 1
+    metas = [item for (pk, sk), item in table.store.items()
+             if pk.startswith("SEARCH#") and sk == "META"]
+    assert len(metas) == 1
 
 
 def test_lease_frees_as_soon_as_the_search_finishes(table) -> None:
@@ -280,15 +414,17 @@ def test_rejected_search_does_not_eat_the_monthly_slot(table, monkeypatch) -> No
     assert counter is None or counter["count"] == 0
 
 
-def test_rejected_search_releases_the_lease(table, monkeypatch) -> None:
-    """...and doesn't leave them locked out on the way through, either."""
+def test_rejected_search_transaction_does_not_acquire_the_lease(table, monkeypatch) -> None:
+    """A rejected atomic reservation leaves the profile untouched."""
     from app.settings import settings
 
     monkeypatch.setattr(settings, "global_monthly_searches", 5)
     _user(table, used=True)
     with pytest.raises(QuotaExhausted):
         searches.create_search("u1", SearchRequest(**VALID))
-    assert table.store[("USER#u1", "PROFILE")].get("active_since") == ""
+    profile = table.store[("USER#u1", "PROFILE")]
+    assert profile.get("active_since") is None
+    assert profile["free_search_used"] is True
 
 
 def test_monthly_cap_of_zero_is_unlimited(table, monkeypatch) -> None:
@@ -372,9 +508,14 @@ def test_get_search_includes_results(table) -> None:
         "opportunity_type": "careers_page",
         "links": ["https://cafex.com.au/careers"],
     }
+    table.store[(f"SEARCH#{sid}", "META")].update({
+        "error_code": "workflow_timeout", "retryable": True,
+    })
     found = searches.get_search("u1", sid)
     assert found["total"] == 1
     assert found["results"][0]["company"] == "Cafe X"
+    assert found["error_code"] == "workflow_timeout"
+    assert found["retryable"] is True
 
 
 def test_result_carries_pin_coordinates_when_present(table) -> None:
@@ -504,9 +645,8 @@ def test_stop_is_rejected_once_the_search_has_finished(table) -> None:
         searches.stop_search("u1", sid)
 
 
-def test_stop_still_cancels_when_the_execution_is_already_gone(table, monkeypatch) -> None:
-    """The pipeline may not be deployed, or the execution already ended. The user
-    asked for it to stop — don't leave it 'running' forever."""
+def test_stop_failure_does_not_claim_cancellation(table, monkeypatch) -> None:
+    """A failed Step Functions stop remains visible; it cannot write a false cancel."""
     _user(table)
     sid = searches.create_search("u1", SearchRequest(**VALID))["search_id"]
     table.store[(f"SEARCH#{sid}", "META")]["execution_arn"] = "arn:bad"
@@ -519,7 +659,9 @@ def test_stop_still_cancels_when_the_execution_is_already_gone(table, monkeypatc
         "_get_sfn",
         lambda: type("S", (), {"stop_execution": lambda _s, **kw: boom(**kw)})(),
     )
-    assert searches.stop_search("u1", sid)["status"] == "cancelled"
+    with pytest.raises(searches.StopFailed):
+        searches.stop_search("u1", sid)
+    assert searches.get_search("u1", sid)["status"] == "pending"
 
 
 def test_stop_refuses_someone_elses_search(table) -> None:

@@ -5,15 +5,14 @@ between a PoC and a dead quota. They must hold, and turning them off for
 production must be a config change rather than a code change.
 """
 import httpx
-from botocore.exceptions import ClientError
 import pytest
 import respx
+from botocore.exceptions import ClientError
 
 from fmaj_agent import config
 from fmaj_agent.budget import DynamoSearchBudget, NoSharedBudget
-from fmaj_agent.discovery import HARD_MAX_COMPANIES
+from fmaj_agent.discovery import HARD_MAX_COMPANIES, discover
 from fmaj_agent.models import Findings, OpportunityType
-from fmaj_agent.discovery import discover
 from fmaj_agent.orchestrator import AgentRun, _over_budget
 from fmaj_agent.places import BASE, PlacesClient
 
@@ -90,7 +89,7 @@ class FakeBudgetTable:
         self.counts: dict[str, int] = {}
         self.error: Exception | None = None
 
-    def update_item(self, Key, UpdateExpression, ConditionExpression,  # noqa: N803
+    def update_item(self, Key, UpdateExpression, ConditionExpression,
                     ExpressionAttributeNames, ExpressionAttributeValues):
         if self.error:
             raise self.error

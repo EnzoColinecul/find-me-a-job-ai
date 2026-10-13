@@ -89,7 +89,10 @@ export interface TraceStep {
 
 export interface Search {
   search_id: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: "pending" | "running" | "completed" | "degraded" | "failed" | "cancelled";
+  company_errors?: number;
+  error_code?: string;
+  retryable?: boolean;
   /** How many discovered companies the agent has finished. */
   progress: { done: number; total: number };
   steps: TraceStep[];
@@ -158,9 +161,13 @@ async function authed(path: string, init?: RequestInit): Promise<Response> {
  * `monthly_cap` (429) and `search_in_progress` (409) are all expected answers
  * here, not bugs, and the caller can tell them apart by `code`.
  */
-export async function createSearch(params: SearchParams): Promise<string> {
+export async function createSearch(
+  params: SearchParams,
+  idempotencyKey = crypto.randomUUID(),
+): Promise<string> {
   const resp = await authed("/searches", {
     method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(params),
   });
   if (!resp.ok) await fail(resp, "Couldn't start that search");

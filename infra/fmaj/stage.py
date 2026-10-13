@@ -3,9 +3,9 @@ import aws_cdk as cdk
 from constructs import Construct
 
 from fmaj.config import StageConfig
+from fmaj.stacks.api_stack import ApiStack
 from fmaj.stacks.auth_stack import AuthStack
 from fmaj.stacks.data_stack import DataStack
-from fmaj.stacks.api_stack import ApiStack
 from fmaj.stacks.pipeline_stack import PipelineStack
 
 

@@ -1,5 +1,5 @@
 """Secrets resolution: env-var fallback path (no AWS calls)."""
-import fmaj_agent.secrets as secrets
+from fmaj_agent import secrets
 
 
 def test_places_key_env_fallback(monkeypatch) -> None:

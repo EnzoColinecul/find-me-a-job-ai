@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, "src")
 
-from fmaj_agent.tools import impl  # noqa: E402
+from fmaj_agent.tools import impl
 
 
 def main(names: list[str]) -> int:

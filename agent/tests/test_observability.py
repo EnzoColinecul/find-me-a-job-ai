@@ -70,8 +70,11 @@ class ScriptedProvider(Provider):
 
     def __init__(self, turns):
         self.turns = list(turns)
+        self.report_prompts = []
 
     def _complete(self, system, messages, **kw):
+        if kw.get("force_tool") == "report_findings":
+            self.report_prompts.append(messages[-1]["text"])
         turn = self.turns.pop(0)
         if isinstance(turn, Exception):
             raise turn
@@ -122,6 +125,7 @@ def test_a_search_produces_one_trace_with_nested_observations(spans, tools, monk
     monkeypatch.setattr(orchestrator, "get_provider", lambda: provider)
     run = orchestrator.investigate(_company(), search_id=SEARCH_ID)
     assert run.findings.opportunity_type is OpportunityType.CONTACT_EMAIL
+    assert run.forced_report_reason == ""
 
     got = spans()
     trace_id = observability.trace_id_for(SEARCH_ID)
@@ -168,6 +172,7 @@ def test_tool_errors_and_budget_events_are_visible(spans, tools, monkeypatch):
     ]))
     run = orchestrator.investigate(_company(), search_id=SEARCH_ID)
     assert run.forced_report
+    assert run.forced_report_reason == "tool_budget"
 
     got = spans()
     (ws,) = _by_name(got, "tool.web_search")
@@ -176,9 +181,41 @@ def test_tool_errors_and_budget_events_are_visible(spans, tools, monkeypatch):
     assert _by_name(got, "budget.denied")
     (breach,) = _by_name(got, "budget.breach")
     assert _attrs(breach)["langfuse.observation.level"] == "WARNING"
+    assert _attrs(breach)["langfuse.observation.metadata.reason"] == "tool_budget"
+    assert not _by_name(got, "agent.missing_report")
     assert _by_name(got, "forced_report")
     (company,) = _by_name(got, "company")
     assert json.loads(_attrs(company)["langfuse.observation.output"])["forced_report"] is True
+
+
+@pytest.mark.parametrize("reply", ["", "I have finished checking."])
+def test_model_termination_is_not_a_budget_breach(spans, monkeypatch, reply):
+    provider = ScriptedProvider([
+        Turn(text='{"plausible": true}'),
+        Turn(text=reply),
+        _tool("report_findings", opportunity_type="none", evidence="no verified lead", confidence=0),
+    ])
+    _use(monkeypatch, provider)
+    steps = []
+    run = orchestrator.investigate(_company(), on_step=steps.append, search_id=SEARCH_ID)
+
+    assert run.forced_report
+    assert run.forced_report_reason == "model_termination"
+    assert not run.error
+    assert run.tool_calls == 0
+    assert len(provider.report_prompts) == 1
+    assert "model stopped without a final report" in provider.report_prompts[0]
+    assert "budget" not in provider.report_prompts[0].lower()
+    assert any(step.tool == "report_findings" and "model stopped" in step.meta for step in steps)
+
+    got = spans()
+    assert not _by_name(got, "budget.breach")
+    (missing,) = _by_name(got, "agent.missing_report")
+    assert _attrs(missing)["langfuse.observation.metadata.reason"] == "model_termination"
+    (company,) = _by_name(got, "company")
+    output = json.loads(_attrs(company)["langfuse.observation.output"])
+    assert output["forced_report_reason"] == "model_termination"
+    assert _attrs(company)["langfuse.observation.status_message"] == "model stopped without a final report"
 
 
 # ── error capture ──────────────────────────────────────────────────────────
@@ -210,6 +247,8 @@ def test_pipeline_steps_join_the_same_trace(spans, monkeypatch):
     class Table:
         def update_item(self, **kw):
             pass
+        def get_item(self, **kw):
+            return {"Item": {"status": "running"}}
 
     monkeypatch.setattr(handlers, "_get_table", lambda: Table())
     handlers.aggregate_handler({"search_id": SEARCH_ID, "results": [
@@ -226,6 +265,29 @@ def test_pipeline_steps_join_the_same_trace(spans, monkeypatch):
     (failed,) = _by_name(got, "search.failed")
     assert _attrs(failed)["langfuse.observation.level"] == "ERROR"
     assert EMAIL not in _all_text(got) and API_KEY not in _all_text(got)
+
+
+def test_aggregate_marks_partial_company_failures_as_degraded(monkeypatch):
+    class Table:
+        update = None
+
+        def get_item(self, **_kw):
+            return {"Item": {"status": "running"}}
+
+        def update_item(self, **kw):
+            self.update = kw
+
+    table = Table()
+    monkeypatch.setattr(handlers, "_get_table", lambda: table)
+    result = handlers.aggregate_handler({"search_id": SEARCH_ID, "results": [
+        {"opportunity_type": "careers_page", "outcome": "success"},
+        {"opportunity_type": "none", "outcome": "error"},
+    ]})
+    assert result["status"] == "degraded"
+    assert result["company_errors"] == 1
+    assert table.update["ExpressionAttributeValues"][":s"] == "degraded"
+    assert table.update["ExpressionAttributeValues"][":e"] == 1
+    assert "ConditionExpression" in table.update
 
 
 def test_trace_id_matches_langfuse_seeded_ids():

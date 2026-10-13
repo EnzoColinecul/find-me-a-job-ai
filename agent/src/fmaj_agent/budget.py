@@ -49,7 +49,7 @@ class NoSharedBudget:
     flight, so the per-company cap already is the per-search cap.
     """
 
-    def reserve(self, tool: str) -> str | None:  # noqa: ARG002
+    def reserve(self, tool: str) -> str | None:
         return None
 
 

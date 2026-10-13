@@ -8,7 +8,7 @@ import {
   type SearchSummary,
 } from "@/lib/api";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type LatLng } from "./map/MapPieces";
 import MapSearchBar from "./workspace/MapSearchBar";
 import StartPanel from "./workspace/StartPanel";
@@ -64,6 +64,7 @@ export default function Workspace({
   const [radiusKm, setRadiusKm] = useState<number>(initialRadiusKm ?? 5);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submissionKey = useRef<{ fingerprint: string; key: string } | null>(null);
   /** Bumped when geolocation lands, to move focus on to the radius choices. */
   const [focusRadius, setFocusRadius] = useState(0);
 
@@ -115,13 +116,19 @@ export default function Workspace({
         const s = suggestions.find((r) => r.label === label);
         return { label, curated_key: s?.curated_key ?? null };
       });
-      const id = await createSearch({
+      const params = {
         lat: center.lat,
         lng: center.lng,
         radius_km: radiusKm,
         roles,
         location_label: locationLabel || undefined,
-      });
+      };
+      const fingerprint = JSON.stringify(params);
+      if (submissionKey.current?.fingerprint !== fingerprint) {
+        submissionKey.current = { fingerprint, key: crypto.randomUUID() };
+      }
+      const id = await createSearch(params, submissionKey.current.key);
+      submissionKey.current = null;
       router.push(`/search/${id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

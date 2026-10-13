@@ -34,15 +34,21 @@ search                                  trace   (name "search")
 │   │   └── role_match                  generation   when a gate judges vacancy titles
 │   ├── budget.denied                   event   a metered tool was refused (WARNING)
 │   ├── budget.breach                   event   tool-call/time budget hit (WARNING)
+│   ├── agent.missing_report            event   model stopped without reporting (WARNING)
 │   ├── forced_report                   generation   the forced report_findings call
 │   └── report.downgraded               event   the report gate rejected a claim
 └── aggregate | search.failed           span    final counts, or the Step Functions error type
 ```
 
 On a `company` observation, the output shows `opportunity_type`, `confidence`,
-link and email *counts*, `forced_report` and `error`. The metadata shows tool
+link and email *counts*, `forced_report`, `forced_report_reason` and `error`. The metadata shows tool
 calls, web searches, tokens and seconds. Levels are `ERROR` (agent error),
 `WARNING` (forced report, failed tool, empty model reply) and `DEFAULT`.
+
+Forced reports distinguish `model_termination`, `tool_budget`, and `time_budget`.
+A model stopping without a report while budget remains emits
+`agent.missing_report`, rather than a budget-breach event. The live trace and
+forced-report prompt use the same reason.
 
 Each generation records the model, the provider (`gemini` / `bedrock`), the
 parameters, `usage_details` (input/output/total tokens) and latency. Cost is

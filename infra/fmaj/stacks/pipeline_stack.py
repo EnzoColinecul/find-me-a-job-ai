@@ -6,10 +6,26 @@ runs `pip install` inside the Lambda build image).
 import aws_cdk as cdk
 from aws_cdk import (
     BundlingOptions,
+)
+from aws_cdk import (
+    aws_events as events,
+)
+from aws_cdk import (
+    aws_events_targets as events_targets,
+)
+from aws_cdk import (
     aws_lambda as lambda_,
+)
+from aws_cdk import (
     aws_logs as logs,
+)
+from aws_cdk import (
     aws_secretsmanager as sm,
+)
+from aws_cdk import (
     aws_stepfunctions as sfn,
+)
+from aws_cdk import (
     aws_stepfunctions_tasks as tasks,
 )
 from constructs import Construct
@@ -18,6 +34,15 @@ from fmaj.config import StageConfig
 from fmaj.stacks.data_stack import DataStack
 
 AGENT_PATH = "../agent"
+BUNDLE_CMD = (
+    "set -e && "
+    "pip install --no-cache-dir --require-hashes --only-binary=:all: "
+    "--timeout 60 --retries 3 --target /asset-output "
+    "-r /asset-input/requirements-lambda.txt && "
+    "cp -r /asset-input/src/fmaj_agent /asset-output/ && "
+    "PYTHONPATH=/asset-output python -c "
+    "'import pydantic_core._pydantic_core; print(\"bundle arch OK\")'"
+)
 MAP_CONCURRENCY = 5
 
 
@@ -40,14 +65,6 @@ class PipelineStack(cdk.Stack):
         # the target arch (emulated on Apple Silicon — slower but correct).
         # The final import check fails the build loudly instead of shipping a broken
         # bundle that only errors at Lambda cold start.
-        bundle_cmd = (
-            "set -e && "
-            "pip install --no-cache-dir --target /asset-output "
-            "-r /asset-input/requirements-lambda.txt && "
-            "cp -r /asset-input/src/fmaj_agent /asset-output/ && "
-            "PYTHONPATH=/asset-output python -c "
-            "'import pydantic_core._pydantic_core; print(\"bundle arch OK\")'"
-        )
         code = lambda_.Code.from_asset(
             AGENT_PATH,
             exclude=[".venv", "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache",
@@ -55,7 +72,7 @@ class PipelineStack(cdk.Stack):
             bundling=BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_12.bundling_image,
                 platform="linux/amd64",  # match Lambda architecture
-                command=["bash", "-c", bundle_cmd],
+                command=["bash", "-c", BUNDLE_CMD],
             ),
         )
 
@@ -144,6 +161,7 @@ class PipelineStack(cdk.Stack):
 
         discover_step.add_catch(fail_step, result_path="$.error")
         map_step.add_catch(fail_step, result_path="$.error")
+        aggregate_step.add_catch(fail_step, result_path="$.error")
 
         definition = discover_step.next(map_step).next(aggregate_step)
 
@@ -153,6 +171,28 @@ class PipelineStack(cdk.Stack):
             state_machine_name=f"fmaj-{config.stage}-search",
             definition_body=sfn.DefinitionBody.from_chainable(definition),
             timeout=cdk.Duration.minutes(15),
+        )
+
+        # A state-machine timeout is an execution-level failure and cannot be
+        # caught by a Task/Map Catch. Reconcile it independently from the
+        # execution-status event so SEARCH#META cannot remain "running" forever.
+        reconcile = events.Rule(
+            self,
+            "ReconcileTerminalExecutionFailures",
+            event_pattern=events.EventPattern(
+                source=["aws.states"],
+                detail_type=["Step Functions Execution Status Change"],
+                detail={
+                    "stateMachineArn": [self.state_machine.state_machine_arn],
+                    "status": ["FAILED", "TIMED_OUT", "ABORTED"],
+                },
+            ),
+        )
+        reconcile.add_target(
+            events_targets.LambdaFunction(
+                fail_fn,
+                event=events.RuleTargetInput.from_object({"detail": events.EventField.from_path("$.detail")}),
+            )
         )
 
         cdk.CfnOutput(self, "StateMachineArn", value=self.state_machine.state_machine_arn)

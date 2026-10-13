@@ -9,10 +9,10 @@ from fmaj_agent.tools.impl import (
 )
 
 __all__ = [
+    "extract_emails",
     "fetch_url",
     "find_careers_link",
     "find_seek_company_page",
     "search_jobs_adzuna",
     "web_search",
-    "extract_emails",
 ]

@@ -70,6 +70,8 @@ const TOOL_DISPLAY: Record<string, string> = {
   // the fallback prints something like "seek company".
   "places.nearby": "Nearby places",
   triage: "Shortlist",
+  analysis: "Investigation",
+  match_role: "Lead verification",
   fetch_page: "Their website",
   extract_jobs: "Their listings",
   "seek.company": "Seek employer page",
@@ -97,8 +99,8 @@ export function narrate(step: TraceStep, search: Search): string {
         // The meta carries the real reason (not a likely employer, or an error).
         if (step.meta.startsWith("error")) {
           return live
-            ? `${who} — I hit a problem looking into this one, so I'm leaving it out.`
-            : `${who} — I hit a problem looking into this one, so I left it out.`;
+            ? `${who} — I hit a problem looking into this one, so this check may be incomplete.`
+            : `${who} — I hit a problem looking into this one, so this check was incomplete.`;
         }
         return live
           ? `${who} doesn't look like somewhere that hires ${rolePhrase(search)} — leaving it out.`
@@ -109,6 +111,7 @@ export function narrate(step: TraceStep, search: Search): string {
         : `${who} looked worth a proper look.`;
 
     case "fetch_page":
+      if (step.tag === "skipping") return `I couldn't read a page for ${who} — this source was unavailable.`;
       if (step.meta) {
         return live
           ? `${who} has a website — reading ${step.meta}.`
@@ -117,6 +120,10 @@ export function narrate(step: TraceStep, search: Search): string {
       return live ? `Reading a page from ${who}.` : `Read a page from ${who}.`;
 
     case "extract_jobs":
+      if (step.tag === "skipping") return `I couldn't complete a listings check for ${who}.`;
+      if (step.tag === "found" && step.meta === "careers page") {
+        return `Found a careers page for ${who}.`;
+      }
       if (step.tag === "found") {
         return live
           ? `${who} has openings listed — picking out the ones that match.`
@@ -127,6 +134,7 @@ export function narrate(step: TraceStep, search: Search): string {
         : `Looked through ${who}'s listings for a match.`;
 
     case "seek.company":
+      if (step.tag === "skipping") return `I couldn't verify a Seek employer page for ${who}.`;
       // Counts the openings on the employer's own Seek page — it never reads
       // the listings themselves (see the robots.txt note in CLAUDE.md), so the
       // sentence must not imply that it did.
@@ -146,15 +154,19 @@ export function narrate(step: TraceStep, search: Search): string {
           : `Searched the web for ${who} and found something to follow up.`;
       }
       if (step.tag === "skipping") {
-        return live
-          ? `I've used up the web searches budgeted for ${who}, so I'll go with what I have.`
-          : `I used up the web searches budgeted for ${who}, so I went with what I had.`;
+        if (/^(budget reached:|tool-call or time budget reached;)/.test(step.meta)) {
+          return live
+            ? `The web search limit was reached while checking ${who} — continuing with the available evidence.`
+            : `The web search limit was reached while checking ${who} — continued with the available evidence.`;
+        }
+        return `I couldn't complete a web search for ${who} — that source is unavailable.`;
       }
       return live
         ? `Searching the web for ${who} job listings.`
         : `Searched the web for ${who} job listings.`;
 
     case "extract_contact":
+      if (step.tag === "skipping") return `I couldn't verify a hiring contact for ${who}.`;
       if (step.tag === "found") {
         return live
           ? `${who} publishes a contact address — picked it up.`
@@ -164,7 +176,33 @@ export function narrate(step: TraceStep, search: Search): string {
         ? `Looking for a contact address on ${who}'s site.`
         : `Looked for a contact address on ${who}'s site.`;
 
+    case "analysis":
+      return step.tag === "skipping"
+        ? `${who} — I hit a problem during the investigation, so this check is incomplete.`
+        : live ? `Investigating ${who}.` : `Investigated ${who}.`;
+
+    case "match_role":
+      return `I couldn't verify the reported lead for ${who} against the requested role and its source.`;
+
     case "report":
+      if (step.tag === "checking") {
+        if (step.meta === "model stopped without a final report") {
+          return live
+            ? `${who}'s check ended before a final report — preparing one from the evidence collected.`
+            : `${who}'s check ended before a final report — prepared one from the evidence collected.`;
+        }
+        if (step.meta === "tool-call budget reached") {
+          return live
+            ? `${who}'s check reached its tool limit — summarising the evidence collected.`
+            : `${who}'s check reached its tool limit — summarised the evidence collected.`;
+        }
+        return live ? `Preparing the result for ${who}.` : `Prepared the result for ${who}.`;
+      }
+      if (step.meta.includes("check incomplete")) {
+        return step.tag === "found"
+          ? `${who}'s check is incomplete, but a verified lead is worth following up.`
+          : `${who}'s check could not finish — no verified lead to show yet.`;
+      }
       return step.tag === "found"
         ? `Done with ${who} — worth contacting.`
         : `Done with ${who} — nothing useful this time.`;

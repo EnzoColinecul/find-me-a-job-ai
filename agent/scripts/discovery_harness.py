@@ -17,8 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from fmaj_agent.discovery import discover  # noqa: E402
-from fmaj_agent.places import PlacesClient  # noqa: E402
+from fmaj_agent.discovery import discover
+from fmaj_agent.places import PlacesClient
 
 DEFAULT_SUBURBS = {
     "Surry Hills": (-33.8845, 151.2119),
